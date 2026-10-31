@@ -1,0 +1,13 @@
+# dsh-browser-control — bundle patch
+# Inserts the browser-control plugin row. The `port` here must match the
+# WS_PORT in extension/config.js (default 18865, chosen to avoid GenericAgent's
+# 18765/18766 pair).
+- insert:
+    - id: browser-control
+      name: dsh-browser-control
+      config:
+        port: 18865
+        host: 127.0.0.1
+        timeoutMs: 30000
+        defaultMaxScanChars: 35000
+        monitor: true

@@ -1,0 +1,5 @@
+node_modules/
+browser-screenshots/
+*.log
+.DS_Store
+test/.tmp*/

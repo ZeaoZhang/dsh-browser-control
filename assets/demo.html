@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DSH Browser Control · 自检页面</title>
+  <style>
+    body { font-family: -apple-system, "PingFang SC", sans-serif; max-width: 820px; margin: 40px auto; padding: 0 20px; color: #222; }
+    h1 { font-size: 22px; }
+    section { border: 1px solid #ddd; border-radius: 10px; padding: 16px 20px; margin: 16px 0; }
+    label { display: inline-block; margin: 6px 16px 6px 0; }
+    input, select { padding: 6px 8px; border: 1px solid #bbb; border-radius: 6px; }
+    button { padding: 7px 14px; margin: 4px 8px 4px 0; border: 1px solid #2563eb; background: #2563eb; color: #fff; border-radius: 6px; cursor: pointer; }
+    button.secondary { background: #fff; color: #2563eb; }
+    ul { padding-left: 20px; }
+    li { margin: 4px 0; }
+    .status { color: #0f766e; font-weight: 600; }
+    .muted { color: #777; font-size: 13px; }
+    dialog { border: 1px solid #ccc; border-radius: 10px; padding: 20px; }
+  </style>
+</head>
+<body>
+  <h1>DSH Browser Control · 自检页面</h1>
+  <p class="muted">扩展连接后，可用 <code>browser_scan</code> 观察本页；用 <code>browser_execute_js</code> 点击按钮或读取状态。</p>
+
+  <section id="counter-section">
+    <h2>计数器</h2>
+    <p>当前计数：<strong id="count">0</strong></p>
+    <button id="increment-btn" data-testid="increment">点击 +1</button>
+    <button id="reset-btn" class="secondary" data-testid="reset">重置</button>
+  </section>
+
+  <section id="form-section">
+    <h2>表单</h2>
+    <form id="profile-form">
+      <label>姓名 <input id="name-input" name="name" type="text" placeholder="张三" value="李雷"></label>
+      <label>角色
+        <select id="role-select" name="role">
+          <option value="dev" selected>开发</option>
+          <option value="qa">测试</option>
+          <option value="pm">产品</option>
+        </select>
+      </label>
+      <label><input id="subscribe-checkbox" type="checkbox" name="subscribe" checked> 订阅周报</label>
+      <button id="submit-btn" type="submit" data-testid="submit">提交</button>
+      <p id="form-status" class="status" aria-live="polite"></p>
+    </form>
+  </section>
+
+  <section id="async-section">
+    <h2>异步状态</h2>
+    <button id="async-btn" data-testid="async">模拟加载</button>
+    <p id="async-status" class="status" aria-live="polite">空闲</p>
+  </section>
+
+  <section id="dialog-section">
+    <h2>对话框</h2>
+    <button id="open-dialog-btn" data-testid="open-dialog">打开确认框</button>
+    <dialog id="confirm-dialog">
+      <p>确认要提交吗？</p>
+      <form method="dialog">
+        <button value="yes" data-testid="dialog-yes">确认</button>
+        <button value="no" class="secondary" data-testid="dialog-no">取消</button>
+      </form>
+    </dialog>
+  </section>
+
+  <section id="list-section">
+    <h2>任务列表（用于测试列表裁剪）</h2>
+    <ul id="task-list">
+      <li class="task-item" data-id="1"><span class="desc">这是第 1 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">修复登录页样式</span> <span class="priority">P1</span> <span class="assignee">王芳</span></li>
+      <li class="task-item" data-id="2"><span class="desc">这是第 2 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">补充浏览器插件文档</span> <span class="priority">P2</span> <span class="assignee">李雷</span></li>
+      <li class="task-item" data-id="3"><span class="desc">这是第 3 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">优化大列表渲染性能</span> <span class="priority">P1</span> <span class="assignee">韩梅梅</span></li>
+      <li class="task-item" data-id="4"><span class="desc">这是第 4 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">整理 CDP 调试速查表</span> <span class="priority">P3</span> <span class="assignee">张三</span></li>
+      <li class="task-item" data-id="5"><span class="desc">这是第 5 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">接入截图回传</span> <span class="priority">P2</span> <span class="assignee">王芳</span></li>
+      <li class="task-item" data-id="6"><span class="desc">这是第 6 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">修复 iframe 内点击坐标</span> <span class="priority">P1</span> <span class="assignee">李雷</span></li>
+      <li class="task-item" data-id="7"><span class="desc">这是第 7 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">增加标签页切换提示</span> <span class="priority">P3</span> <span class="assignee">韩梅梅</span></li>
+      <li class="task-item" data-id="8"><span class="desc">这是第 8 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">处理 Service Worker 休眠</span> <span class="priority">P1</span> <span class="assignee">张三</span></li>
+      <li class="task-item" data-id="9"><span class="desc">这是第 9 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">记录页面导航日志</span> <span class="priority">P2</span> <span class="assignee">王芳</span></li>
+      <li class="task-item" data-id="10"><span class="desc">这是第 10 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">降低 scan 输出体积</span> <span class="priority">P2</span> <span class="assignee">李雷</span></li>
+      <li class="task-item" data-id="11"><span class="desc">这是第 11 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">支持 text_only 模式</span> <span class="priority">P3</span> <span class="assignee">韩梅梅</span></li>
+      <li class="task-item" data-id="12"><span class="desc">这是第 12 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">完善错误提示文案</span> <span class="priority">P3</span> <span class="assignee">张三</span></li>
+      <li class="task-item" data-id="13"><span class="desc">这是第 13 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">补充单元测试</span> <span class="priority">P2</span> <span class="assignee">王芳</span></li>
+      <li class="task-item" data-id="14"><span class="desc">这是第 14 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">支持 JPEG 截图</span> <span class="priority">P3</span> <span class="assignee">李雷</span></li>
+      <li class="task-item" data-id="15"><span class="desc">这是第 15 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">评估无扩展模式</span> <span class="priority">P4</span> <span class="assignee">韩梅梅</span></li>
+      <li class="task-item" data-id="16"><span class="desc">这是第 16 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">整理常见问题</span> <span class="priority">P3</span> <span class="assignee">张三</span></li>
+      <li class="task-item" data-id="17"><span class="desc">这是第 17 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">处理多窗口标签页</span> <span class="priority">P2</span> <span class="assignee">王芳</span></li>
+      <li class="task-item" data-id="18"><span class="desc">这是第 18 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">兼容旧版扩展协议</span> <span class="priority">P2</span> <span class="assignee">李雷</span></li>
+      <li class="task-item" data-id="19"><span class="desc">这是第 19 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">检查 CSP 回退路径</span> <span class="priority">P1</span> <span class="assignee">韩梅梅</span></li>
+      <li class="task-item" data-id="20"><span class="desc">这是第 20 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">编写安装脚本</span> <span class="priority">P3</span> <span class="assignee">张三</span></li>
+      <li class="task-item" data-id="21"><span class="desc">这是第 21 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">统一日志前缀</span> <span class="priority">P4</span> <span class="assignee">王芳</span></li>
+      <li class="task-item" data-id="22"><span class="desc">这是第 22 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">支持页内滚动</span> <span class="priority">P3</span> <span class="assignee">李雷</span></li>
+      <li class="task-item" data-id="23"><span class="desc">这是第 23 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">验证输入框输入</span> <span class="priority">P1</span> <span class="assignee">韩梅梅</span></li>
+      <li class="task-item" data-id="24"><span class="desc">这是第 24 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">验证下拉框选择</span> <span class="priority">P2</span> <span class="assignee">张三</span></li>
+      <li class="task-item" data-id="25"><span class="desc">这是第 25 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">验证复选框切换</span> <span class="priority">P2</span> <span class="assignee">王芳</span></li>
+      <li class="task-item" data-id="26"><span class="desc">这是第 26 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">补充 README 截图</span> <span class="priority">P4</span> <span class="assignee">李雷</span></li>
+      <li class="task-item" data-id="27"><span class="desc">这是第 27 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">压缩 findMainList 输出</span> <span class="priority">P3</span> <span class="assignee">韩梅梅</span></li>
+      <li class="task-item" data-id="28"><span class="desc">这是第 28 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">检查 iframe 扁平化</span> <span class="priority">P2</span> <span class="assignee">张三</span></li>
+      <li class="task-item" data-id="29"><span class="desc">这是第 29 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">修复超时误报</span> <span class="priority">P1</span> <span class="assignee">王芳</span></li>
+      <li class="task-item" data-id="30"><span class="desc">这是第 30 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">最后一项：用于验证截断提示</span> <span class="priority">P4</span> <span class="assignee">李雷</span></li>
+    </ul>
+    <button id="add-task-btn" class="secondary" data-testid="add-task">追加任务</button>
+  </section>
+
+  <script>
+    const countEl = document.getElementById('count');
+    let count = 0;
+    document.getElementById('increment-btn').addEventListener('click', () => { count += 1; countEl.textContent = String(count); });
+    document.getElementById('reset-btn').addEventListener('click', () => { count = 0; countEl.textContent = '0'; });
+
+    document.getElementById('profile-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      const name = document.getElementById('name-input').value;
+      const role = document.getElementById('role-select').value;
+      document.getElementById('form-status').textContent = `已提交：${name} / ${role}`;
+    });
+
+    document.getElementById('async-btn').addEventListener('click', () => {
+      const status = document.getElementById('async-status');
+      status.textContent = '加载中…';
+      setTimeout(() => { status.textContent = '加载完成 ' + new Date().toLocaleTimeString(); }, 700);
+    });
+
+    document.getElementById('open-dialog-btn').addEventListener('click', () => {
+      document.getElementById('confirm-dialog').showModal();
+    });
+
+    let nextTaskId = 31;
+    document.getElementById('add-task-btn').addEventListener('click', () => {
+      const list = document.getElementById('task-list');
+      const item = document.createElement('li');
+      item.className = 'task-item';
+      item.dataset.id = String(nextTaskId);
+      item.innerHTML = `<span class="title">新追加任务 ${nextTaskId}</span> <span class="priority">P2</span> <span class="assignee">自动</span>`;
+      list.appendChild(item);
+      nextTaskId += 1;
+    });
+  </script>
+</body>
+</html>
