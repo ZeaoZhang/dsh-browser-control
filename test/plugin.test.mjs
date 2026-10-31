@@ -62,7 +62,10 @@ const fakeDriver = {
   startError: null,
   screenshotDir: shotDir,
   listTabs: () => [{ tab_id: 7, url: fakeTab.url, title: fakeTab.title, active: true, current: true, browser: 'c1' }],
-  resolveTarget: async () => ({ conn: fakeConn, tab: fakeTab }),
+  resolveTarget: async (args) => {
+    if (args.tab_id !== undefined) assert.equal(typeof args.tab_id, 'number', 'tab_id should be coerced to a number');
+    return { conn: fakeConn, tab: fakeTab };
+  },
   scan: async () => '<div id="ok">hello</div>',
   runScript: async () => ({ answer: 42 }),
   monitorStart: async () => ({ timeOrigin: 1, url: fakeTab.url }),
@@ -96,6 +99,14 @@ const scanOk = await exec('browser_scan', {});
 assert.equal(scanOk.status, 'success');
 assert.equal(scanOk.chars, '<div id="ok">hello</div>'.length);
 assert.match(successful.get('browser_scan').output.render({}, scanOk)[0].text, /hello/);
+
+// Models often echo a tab id back as a string; the schema accepts both.
+const scanStringId = await exec('browser_scan', { tab_id: '7' });
+assert.equal(scanStringId.status, 'success');
+assert.equal(scanStringId.tab_id, 7);
+const scanBadId = await exec('browser_scan', { tab_id: 'abc' });
+assert.equal(scanBadId.status, 'error');
+assert.match(scanBadId.error, /正整数/);
 
 const jsOk = await exec('browser_execute_js', { code: 'return 42' });
 assert.equal(jsOk.status, 'success');
