@@ -122,7 +122,7 @@ GenericAgent 的 `TMWebDriver` 默认监听 **18765**（HTTP 在 18766），本�
 
 ### 扩展页面（`chrome-extension://`）
 
-`browser_tabs` 现在也会列出 `chrome-extension://` 页面（包括本扩展自己的 `popup.html`）。Chrome 禁止用 `chrome.scripting` 向扩展页面注入脚本，插件检测到后会自动退回 `chrome.debugger` + CDP `Runtime.evaluate`，因此 `browser_scan` / `browser_execute_js` / `browser_screenshot` / `browser_cdp` 在扩展页面上同样可用。`chrome://`、`devtools://` 等浏览器内部页仍然不支持。
+`browser_tabs` 现在也会列出 `chrome-extension://` 页面（包括本扩展自己的 `popup.html`）。Chrome 禁止用 `chrome.scripting` 向扩展页面注入脚本，插件检测到后会自动退回 `chrome.debugger` + CDP `Runtime.evaluate`，因此 `browser_scan` / `browser_execute_js` / `browser_screenshot` / `browser_cdp` 在扩展页面上同样可用。`chrome://`、`devtools://` 等浏览器内部页仍然不支持；另外 Chrome 禁止扩展访问**其他扩展**的 `chrome-extension://` 页面（报错 `Cannot access a chrome-extension:// URL of different extension`），因此可操控的扩展页面仅限本插件自己的 `popup.html` 等页面。
 
 ```json
 { "action": "open", "url": "chrome-extension://<扩展ID>/popup.html" }
