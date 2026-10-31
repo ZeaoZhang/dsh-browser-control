@@ -164,8 +164,10 @@ async function handleCDP(msg, sender) {
     return { ok: false, error: e.message };
   }
 }
-// Filter out chrome:// and other internal tabs that can't be scripted
-const isScriptable = url => url && /^https?:/.test(url);
+// http(s)/file/extension pages are controllable (extension pages go through
+// the chrome.debugger CDP fallback because chrome.scripting refuses them).
+// chrome:// and other internal browser pages stay out of the tab list.
+const isScriptable = url => !!url && /^(https?|file|chrome-extension):/i.test(url);
 
 // --- Shared page/CDP script builder core ---
 function buildExecScript(code, errorHandler) {

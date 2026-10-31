@@ -120,6 +120,14 @@ GenericAgent 的 `TMWebDriver` 默认监听 **18765**（HTTP 在 18766），本�
 
 > 导航会销毁页面上下文，必须作为独立调用；脚本里不要 `location.href = ...` 之后继续执行。
 
+### 扩展页面（`chrome-extension://`）
+
+`browser_tabs` 现在也会列出 `chrome-extension://` 页面（包括本扩展自己的 `popup.html`）。Chrome 禁止用 `chrome.scripting` 向扩展页面注入脚本，插件检测到后会自动退回 `chrome.debugger` + CDP `Runtime.evaluate`，因此 `browser_scan` / `browser_execute_js` / `browser_screenshot` / `browser_cdp` 在扩展页面上同样可用。`chrome://`、`devtools://` 等浏览器内部页仍然不支持。
+
+```json
+{ "action": "open", "url": "chrome-extension://<扩展ID>/popup.html" }
+```
+
 ### `browser_scan`
 
 返回经过 token 优化的可见 HTML。`text_only=true` 返回纯文本；`cut_list=true`（默认）裁剪大列表；`instruction` 可指定希望保留的列表项关键词；`max_chars` 覆盖默认上限（硬上限：超长时先删减列表/子元素，再压缩文本，保证返回内容不超过约 `max_chars` 字符，并带 `[TRUNCATED]`/`…` 标记）。
@@ -213,6 +221,9 @@ ln -sfn "$HOME/workspace/dsh/dsh-remote/node_modules/@deepseek-ai/dsh-tools" nod
 - 扩展会为所有页面移除 CSP 响应头，以规避 `unsafe-eval` 限制；这是为了 `browser_execute_js` 的可用性，属于有意为之。
 
 ## 常见问题
+
+**扩展页面不在标签页列表里 / 无法扫描？**
+请确认扩展已更新到 v2.3+ 并在 `chrome://extensions` 里“重新加载”；旧版会过滤掉 `chrome-extension://` 页面。扩展页面的脚本执行走 CDP 兜底，首次调用可能比普通网页慢一点。
 
 **扩展未连接？**
 `curl http://127.0.0.1:18865/` 应返回 `{"ok":true,...}`；在 `chrome://extensions` 里重新加载扩展，并查看 Service Worker 控制台是否有 WS 错误。

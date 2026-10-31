@@ -163,6 +163,21 @@ try {
   assert.ok(meta && meta.cssVisualViewport, 'CDP layout metrics missing');
   console.log('cdp ok');
 
+  // --- chrome-extension:// pages -----------------------------------------
+  await driver.newTab(`chrome-extension://${loaded.id}/popup.html`, true);
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  await driver.syncTabs();
+  const extTab = driver.listTabs().find((tab) => tab.url.startsWith('chrome-extension://'));
+  assert.ok(extTab, `extension page missing from tabs: ${JSON.stringify(driver.listTabs())}`);
+  const extTarget = await driver.resolveTarget({ tab_id: extTab.tab_id });
+  const extVersion = await driver.runScript(extTarget, 'return window.__DSH_BROWSER__ ? window.__DSH_BROWSER__.version : null');
+  assert.equal(extVersion, 3);
+  const extHtml = await driver.scan(extTarget, { maxChars: 4000 });
+  assert.ok(/Cookies|浏览器服务|DSH/.test(extHtml), `unexpected extension page scan: ${extHtml.slice(0, 300)}`);
+  const extShot = await driver.cdp(extTarget, 'Page.captureScreenshot', { format: 'png' });
+  assert.ok(extShot?.data?.length > 1000, 'extension page screenshot failed');
+  console.log(`extension page ok: ${extHtml.length} chars`);
+
   console.log('e2e chrome test passed');
 } finally {
   await cleanup();
