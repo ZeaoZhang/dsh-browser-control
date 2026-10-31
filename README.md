@@ -120,6 +120,26 @@ GenericAgent 的 `TMWebDriver` 默认监听 **18765**（HTTP 在 18766），本�
 
 > 导航会销毁页面上下文，必须作为独立调用；脚本里不要 `location.href = ...` 之后继续执行。
 
+
+#### 跨扩展页面（合作式桥接）
+
+Chrome 不允许扩展 A 控制扩展 B 的 `chrome-extension://` 页面（`chrome.scripting` 和 `chrome.debugger` 都会被拒绝）。如果目标扩展是你自己的源码，可以在它里面加一个约 40 行的桥接：用目标扩展自己的 `chrome.debugger` 去执行我们发来的代码。
+
+以 OpenTeam 为例（源码 `/Users/zhangzeao/workspace/openteam`）：
+
+1. `public/manifest.json` 的 `permissions` 里加 `"debugger"`；
+2. `src/background/index.ts` 里注册 `chrome.runtime.onMessageExternal`，校验 `sender.id` 后 `chrome.debugger.attach({ tabId })` + `Runtime.evaluate`；
+3. 重新构建并重新加载 OpenTeam。
+
+桥接协议（消息体）：
+
+```json
+{ "type": "DSH_BROWSER_BRIDGE", "tabId": 123, "expression": "document.title" }
+{ "type": "DSH_BROWSER_BRIDGE", "tabId": 123, "method": "Page.captureScreenshot", "params": { "format": "png" } }
+```
+
+插件检测到目标 tab 属于 `chrome-extension://` 且不是自己时，会在普通通道失败后自动调用 `ext_eval` / `ext_cdp` 走桥接；目标扩展没有实现桥接时会返回上面那条友好错误。桥接里请把 `DSH_BROWSER_EXTENSION_ID` 固定为本插件的扩展 ID（当前 `ldcmjcmnjgdfiifmbjbjegncfdgpnlbp`）。
+
 ### 扩展页面（`chrome-extension://`）
 
 `browser_tabs` 现在也会列出 `chrome-extension://` 页面（包括本扩展自己的 `popup.html`）。Chrome 禁止用 `chrome.scripting` 向扩展页面注入脚本，插件检测到后会自动退回 `chrome.debugger` + CDP `Runtime.evaluate`，因此 `browser_scan` / `browser_execute_js` / `browser_screenshot` / `browser_cdp` 在扩展页面上同样可用。`chrome://`、`devtools://` 等浏览器内部页仍然不支持；另外 Chrome 禁止扩展访问**其他扩展**的 `chrome-extension://` 页面（报错 `Cannot access a chrome-extension:// URL of different extension`），因此可操控的扩展页面仅限本插件自己的 `popup.html` 等页面。
@@ -223,7 +243,7 @@ ln -sfn "$HOME/workspace/dsh/dsh-remote/node_modules/@deepseek-ai/dsh-tools" nod
 ## 常见问题
 
 **扩展页面不在标签页列表里 / 无法扫描？**
-请确认扩展已更新到 v2.3+ 并在 `chrome://extensions` 里“重新加载”；旧版会过滤掉 `chrome-extension://` 页面。扩展页面的脚本执行走 CDP 兜底，首次调用可能比普通网页慢一点。
+请确认扩展已更新到 v2.5+ 并在 `chrome://extensions` 里“重新加载”；旧版会过滤掉 `chrome-extension://` 页面。扩展页面的脚本执行走 CDP 兜底，首次调用可能比普通网页慢一点。
 
 **扩展未连接？**
 `curl http://127.0.0.1:18865/` 应返回 `{"ok":true,...}`；在 `chrome://extensions` 里重新加载扩展，并查看 Service Worker 控制台是否有 WS 错误。

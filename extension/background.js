@@ -16,11 +16,79 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
+const EXT_BRIDGE_MESSAGE = 'DSH_BROWSER_BRIDGE';
+const EXT_BRIDGE_TIMEOUT_MS = 25000;
+
+function sendMessageToExtension(extensionId, payload, timeoutMs = EXT_BRIDGE_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      finish({ ok: false, error: '通过目标扩展执行超时（' + Math.round(timeoutMs / 1000) + 's）' });
+    }, timeoutMs);
+    try {
+      chrome.runtime.sendMessage(extensionId, payload, (response) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          finish({ ok: false, error: lastError.message || '目标扩展无响应' });
+          return;
+        }
+        finish(response || { ok: false, error: '目标扩展没有返回响应' });
+      });
+    } catch (e) {
+      finish({ ok: false, error: e.message });
+    }
+  });
+}
+
+// Runtime.evaluate has no async-function auto-return, so normalise the code the
+// same way the direct chrome.scripting path does: async body for statements or
+// explicit returns, expression wrapper for a single value.
+function buildBridgeExpression(code) {
+  const src = String(code == null ? '' : code).trim();
+  if (/(^|[\n;])\s*return\b/.test(src) || src.includes(';')) {
+    return '(async () => {\n' + src + '\n})()';
+  }
+  return '(async () => (' + src + '))()';
+}
+
+// Cross-extension chrome-extension:// pages cannot be scripted or debugged by
+// this extension. If the target extension embeds the DSH_BROWSER_BRIDGE handler
+// (it evaluates on this tab with its own chrome.debugger), route through it.
+async function handleExtBridge(msg) {
+  const extensionId = String(msg.extensionId || '');
+  if (!/^[a-p]{32}$/.test(extensionId)) return { ok: false, error: '无效的 extensionId' };
+  if (extensionId === chrome.runtime.id) return { ok: false, error: '不能桥接到自身扩展' };
+  const payload = msg.cmd === 'ext_eval'
+    ? { type: EXT_BRIDGE_MESSAGE, tabId: msg.tabId, expression: buildBridgeExpression(msg.code) }
+    : { type: EXT_BRIDGE_MESSAGE, tabId: msg.tabId, method: msg.method, params: msg.params || {} };
+  const response = await sendMessageToExtension(extensionId, payload, msg.timeoutMs);
+  if (!response || response.ok !== true) {
+    return { ok: false, error: (response && response.error) || '目标扩展未实现 DSH_BROWSER_BRIDGE 桥接' };
+  }
+  if (msg.cmd === 'ext_eval') {
+    const cdp = response.result || {};
+    if (cdp.exceptionDetails) {
+      const detail = cdp.exceptionDetails;
+      const text = (detail.exception && (detail.exception.description || detail.exception.value)) || detail.text || '目标页面 JS 异常';
+      return { ok: false, error: String(text) };
+    }
+    return { ok: true, data: cdp.result ? cdp.result.value : undefined };
+  }
+  return { ok: true, data: response.result };
+}
+
 async function handleExtMessage(msg, sender) {
   if (msg.cmd === 'status') {
     return { ok: true, data: { state: status, ws: !!(ws && ws.readyState === WebSocket.OPEN), server: HTTP_PROBE } };
   }
   if (msg.cmd === 'cookies') return await handleCookies(msg, sender);
+  if (msg.cmd === 'ext_eval' || msg.cmd === 'ext_cdp') return await handleExtBridge(msg);
   if (msg.cmd === 'cdp') return await handleCDP(msg, sender);
   if (msg.cmd === 'batch') return await handleBatch(msg, sender);
   if (msg.cmd === 'tabs') {
