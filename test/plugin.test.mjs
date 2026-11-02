@@ -63,6 +63,7 @@ assert.match(scan.error, /扩展/);
 // representative value so dsh-tools validates each output schema end to end.
 const shotDir = path.join(os.tmpdir(), 'dsh-browser-control-test-shots');
 const fakeTab = { id: 7, url: 'http://example.test/', title: 'Example', active: true };
+const fakeScanHtml = '<button id="ok" data-dsh-ref="@e1">hello</button>';
 const fakeConn = { id: 'c1', tabs: new Map([[7, fakeTab]]) };
 const fakeDriver = {
   listening: true,
@@ -74,7 +75,7 @@ const fakeDriver = {
     if (args.tab_id !== undefined) assert.equal(typeof args.tab_id, 'number', 'tab_id should be coerced to a number');
     return { conn: fakeConn, tab: fakeTab };
   },
-  scan: async () => '<div id="ok">hello</div>',
+  scan: async () => fakeScanHtml,
   runScript: async () => ({ answer: 42 }),
   monitorStart: async () => ({ timeOrigin: 1, url: fakeTab.url }),
   monitorFinish: async () => ({
@@ -85,10 +86,11 @@ const fakeDriver = {
   }),
   refreshTabs: async () => {},
   syncTabs: async () => {},
-  cdp: async (_target, method) =>
-    method === 'Page.captureScreenshot'
-      ? { data: Buffer.from('fake-png').toString('base64') }
-      : { value: 'ok' },
+  cdp: async (_target, method) => {
+    if (method === 'Page.captureScreenshot') return { data: Buffer.from('fake-png').toString('base64') };
+    if (method === 'Page.getLayoutMetrics') return { cssContentSize: { width: 800, height: 1200 } };
+    return { value: 'ok' };
+  },
   newTab: async () => ({ id: 9, url: 'http://new.test/', title: 'New' }),
   closeTab: async () => {},
   activateTab: async () => {},
@@ -119,7 +121,10 @@ const exec = (tool, args) => successful.get(tool).execute(args, { signal: new Ab
 
 const scanOk = await exec('browser_scan', {});
 assert.equal(scanOk.status, 'success');
-assert.equal(scanOk.chars, '<div id="ok">hello</div>'.length);
+assert.equal(scanOk.chars, fakeScanHtml.length);
+assert.equal(scanOk.refs, 1);
+assert.match(scanOk.content, /data-dsh-ref="@e1"/);
+assert.match(successful.get('browser_scan').output.render({}, scanOk)[0].text, /refs: 1/);
 assert.match(successful.get('browser_scan').output.render({}, scanOk)[0].text, /hello/);
 
 // Models often echo a tab id back as a string; the schema accepts both.
@@ -166,6 +171,13 @@ assert.equal(cdpOk.result_json, '{"value":"ok"}');
 const shot = await exec('browser_screenshot', {});
 assert.equal(shot.status, 'success');
 assert.ok(shot.bytes > 0);
+assert.equal(shot.full_page, false);
+
+const shotFull = await exec('browser_screenshot', { full_page: true });
+assert.equal(shotFull.status, 'success');
+assert.equal(shotFull.full_page, true);
+assert.equal(shotFull.width, 800);
+assert.equal(shotFull.height, 1200);
 await rm(shotDir, { recursive: true, force: true });
 
 const opened = await exec('browser_tabs', { action: 'open', url: 'http://new.test/' });

@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BrowserDriver } from '../lib/driver.js';
+import { registerTools } from '../lib/tools.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -80,7 +81,8 @@ assert.ok(loaded && loaded.id, `Extensions.loadUnpacked failed: ${JSON.stringify
 
 function cleanup() {
   try { chrome.kill('SIGKILL'); } catch { /* ignore */ }
-  return driver.stop().finally(() => rm(tmp, { recursive: true, force: true }));
+  return driver.stop().finally(() =>
+    rm(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }).catch(() => {}));
 }
 
 try {
@@ -103,7 +105,25 @@ try {
   assert.ok(html.includes('默认备注'), 'scan should expose textarea content');
   assert.ok(html.includes('checked'), 'scan should expose checkbox checked state');
   assert.ok(!html.includes('ljq_driver'), 'plugin status badge leaked into scan');
-  console.log(`scan ok: ${html.length} chars`);
+  const refOf = (markup, id) => {
+    const tag = markup.match(new RegExp(`<[^>]*\\bid="${id}"[^>]*>`))?.[0] || '';
+    return tag.match(/data-dsh-ref="(@e\d+)"/)?.[1] || '';
+  };
+  const incrementRef = refOf(html, 'increment-btn');
+  assert.ok(incrementRef, 'interactive button has no data-dsh-ref');
+  const resetRef = refOf(html, 'reset-btn');
+  assert.ok(resetRef, 'reset button has no ref');
+  const rescan = await driver.scan(target, { maxChars: 12000, cutList: true });
+  assert.equal(refOf(rescan, 'increment-btn'), incrementRef, 'ref changed for the same element across scans');
+  assert.ok((rescan.match(/data-dsh-ref=/g) || []).length >= 5, 'too few refs assigned');
+  console.log(`scan ok: ${html.length} chars (refs ${incrementRef})`);
+
+  // text_only used to return before the cut-list pass, so cut_list was a no-op.
+  const text = await driver.scan(target, { textOnly: true, cutList: true, maxChars: 12000 });
+  assert.ok(text.includes('[FAKE ELEMENT]'), 'text_only scan ignored cut_list');
+  assert.ok(text.includes('任务列表'), 'text_only scan missed the list heading');
+  assert.ok(!text.includes('第 30 条'), 'cut_list did not hide the tail of the large list');
+  console.log(`text scan ok: ${text.length} chars`);
 
   // --- high-level actions + waits -----------------------------------------
   const fill = await driver.act(target, { action: 'fill', target: '#name-input', value: '韩梅梅' });
@@ -120,19 +140,23 @@ try {
   const formWait = await driver.waitFor(target, { for: 'text', text: '已提交：韩梅梅 / qa', timeoutMs: 3000 });
   assert.equal(formWait.ok, true, `form text wait failed: ${JSON.stringify(formWait)}`);
 
-  const clickIncrement = await driver.act(target, { action: 'click', target: '#increment-btn' });
+  const resetByRef = await driver.act(target, { action: 'click', target: `ref=${resetRef.replace('@', '')}` });
+  assert.equal(resetByRef.ok, true, `ref= click failed: ${JSON.stringify(resetByRef)}`);
+  const clickIncrement = await driver.act(target, { action: 'click', target: incrementRef });
   assert.equal(clickIncrement.ok, true, `increment click failed: ${JSON.stringify(clickIncrement)}`);
   assert.ok(clickIncrement.changed >= 1, 'click did not report DOM changes');
+  assert.ok(clickIncrement.waited_ms <= 1000, `settle took too long: ${clickIncrement.waited_ms}ms`);
   assert.equal(await driver.runScript(target, 'return document.getElementById("count").textContent'), '1');
 
   const asyncClick = await driver.act(target, { action: 'click', target: '#async-btn' });
   assert.equal(asyncClick.ok, true, `async click failed: ${JSON.stringify(asyncClick)}`);
   const asyncWait = await driver.waitFor(target, { for: 'text', text: '加载完成', timeoutMs: 4000 });
   assert.equal(asyncWait.ok, true, `async text wait failed: ${JSON.stringify(asyncWait)}`);
+
   const missingWait = await driver.waitFor(target, { for: 'selector', selector: '#not-there', timeoutMs: 300 });
   assert.equal(missingWait.ok, false);
   assert.equal(missingWait.code, 'WAIT_TIMEOUT');
-  console.log('act/wait ok');
+  console.log(`act/wait ok (click settle ${clickIncrement.waited_ms}ms)`);
 
   // --- execute JS ---------------------------------------------------------
   const initial = await driver.runScript(target, 'return document.getElementById("count").textContent');
@@ -157,6 +181,17 @@ try {
   assert.ok(Array.isArray(monitor.diff.items));
   assert.equal('top_change' in monitor.diff, false, 'monitor should return a compact diff, not raw HTML');
   console.log('monitor ok');
+
+  // A ref is bound to the element instance: removing it must fail loudly, not
+  // silently resolve a different element. Done after monitor because the
+  // monitor case still clicks #async-btn.
+  const asyncRef = refOf(html, 'async-btn');
+  assert.ok(asyncRef, 'async button has no ref');
+  await driver.runScript(target, 'document.getElementById("async-btn").remove()');
+  const stale = await driver.act(target, { action: 'click', target: asyncRef });
+  assert.equal(stale.ok, false, `stale ref unexpectedly worked: ${JSON.stringify(stale)}`);
+  assert.equal(stale.code, 'REF_STALE');
+  console.log('ref ok');
 
   // --- max_chars hard cap -------------------------------------------------
   await driver.runScript(target, `
@@ -211,6 +246,32 @@ try {
   await writeFile(shotPath, Buffer.from(shot.data, 'base64'));
   const meta = await driver.cdp(target, 'Page.getLayoutMetrics');
   assert.ok(meta && meta.cssVisualViewport, 'CDP layout metrics missing');
+
+  // Tool-level screenshot: full page + plugin badge hidden/restored.
+  const tools = new Map();
+  registerTools(
+    { tools: { register(definition) { tools.set(definition.name, definition); return () => {}; } } },
+    driver,
+    { defaultMaxScanChars: 12000, monitor: true },
+    { info: () => {} },
+  );
+  const fullShot = await tools.get('browser_screenshot').execute(
+    { tab_id: target.tab.id, full_page: true },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(fullShot.status, 'success', `full-page screenshot failed: ${fullShot.error}`);
+  assert.equal(fullShot.full_page, true);
+  assert.ok(fullShot.width > 0 && fullShot.height > 500, `bad full-page size: ${fullShot.width}x${fullShot.height}`);
+  const png = await readFile(fullShot.path);
+  assert.equal(png.readUInt32BE(16), fullShot.width, 'full-page PNG width mismatch');
+  assert.equal(png.readUInt32BE(20), fullShot.height, 'full-page PNG height mismatch');
+  const badgeState = await driver.runScript(target, `(() => ({
+    pending: document.querySelectorAll('[data-dsh-prev-visibility]').length,
+    hidden: [...document.querySelectorAll('[data-dsh-ui="1"],#dsh-browser-badge')].filter((el) => el.style.visibility === 'hidden').length,
+  }))()`);
+  assert.equal(badgeState.pending, 0, 'badge visibility marker was not cleaned up');
+  assert.equal(badgeState.hidden, 0, 'badge stayed hidden after screenshot');
+  console.log('screenshot ok');
   console.log('cdp ok');
 
   // --- chrome-extension:// pages -----------------------------------------
@@ -221,7 +282,7 @@ try {
   assert.ok(extTab, `extension page missing from tabs: ${JSON.stringify(driver.listTabs())}`);
   const extTarget = await driver.resolveTarget({ tab_id: extTab.tab_id });
   const extVersion = await driver.runScript(extTarget, 'return window.__DSH_BROWSER__ ? window.__DSH_BROWSER__.version : null');
-  assert.equal(extVersion, 5);
+  assert.equal(extVersion, 6);
   const extHtml = await driver.scan(extTarget, { maxChars: 4000 });
   assert.ok(/Cookies|浏览器服务|DSH/.test(extHtml), `unexpected extension page scan: ${extHtml.slice(0, 300)}`);
   const extShot = await driver.cdp(extTarget, 'Page.captureScreenshot', { format: 'png' });

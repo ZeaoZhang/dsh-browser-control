@@ -25,7 +25,7 @@ lib/driver.js  ◀──────  WebSocket 127.0.0.1:18865  ─────
 
 - `lib/ws.js`：RFC 6455 服务端实现（握手、掩码、分片、ping/pong、close）。
 - `lib/driver.js`：连接管理、标签页注册、请求/响应关联、页面注入、`scan` / `runScript` / `monitorStart` / `monitorFinish` / `act` / `waitFor` / `cdp` / 标签页操作；导航前解析相对 URL，绝对 URL 原样透传。
-- `lib/page/`：`opt_html.js` 与 `find_main_list.js` 从 GenericAgent 原样提取（`tools/import-from-genericagent.mjs`）；`scan_runtime.js` 是在浏览器里运行的优化、裁剪、截断、diff 实现；`actions.js` 提供高层交互、等待与 DOM 稳定检测。
+- `lib/page/`：`opt_html.js` 与 `find_main_list.js` 从 GenericAgent 原样提取（`tools/import-from-genericagent.mjs`）；`scan_runtime.js` 是在浏览器里运行的优化、裁剪、截断、diff 实现；`actions.js` 提供 ref 编号、高层交互、等待与 DOM 稳定检测。
 - `lib/tools.js`：七个 DSH 工具定义（`defineTool`）。
 - `extension/`：MV3 扩展。`config.js` 里的 `WS_PORT` 必须与插件配置一致。
 - `assets/demo.html`：`/demo` 自检页（计数器、表单、弹窗、异步按钮、30 条长列表），用于快速验证 scan/act/wait/execute/screenshot。
@@ -159,7 +159,9 @@ Chrome 不允许扩展 A 控制扩展 B 的 `chrome-extension://` 页面（`chro
 
 ### `browser_scan`
 
-返回经过 token 优化的可见 HTML。`text_only=true` 返回纯文本；`cut_list=true`（默认）裁剪大列表；`instruction` 可指定希望保留的列表项关键词；`max_chars` 覆盖默认上限（硬上限：超长时先删减列表/子元素，再压缩文本，保证返回内容不超过约 `max_chars` 字符，并带 `[TRUNCATED]`/`…` 标记）。
+返回经过 token 优化的可见 HTML。`text_only=true` 返回纯文本；`cut_list=true`（默认）裁剪大列表，HTML 与 `text_only` 两种模式都生效；`instruction` 可指定希望保留的列表项关键词；`max_chars` 覆盖默认上限（硬上限：超长时先删减列表/子元素，再压缩文本，保证返回内容不超过约 `max_chars` 字符，并带 `[TRUNCATED]`/`…` 标记）。
+
+HTML 模式下，可见的可交互元素会带 `data-dsh-ref="@eN"`（如 `@e12`），可直接用于 `browser_act` 的 `target`；同一元素在重新扫描时会复用原 ref，元素被移除/重渲染后旧 ref 失效。`text_only` 模式不产生 ref。
 
 输入框会输出当前 `value`（password 只标记 `data-filled`），checkbox/radio 输出 `checked`，select 输出 `data-selected`，并保留 `disabled`、`aria-expanded` 等状态；插件自己的右下角角标（`#dsh-browser-badge`）会被过滤。
 
@@ -196,9 +198,10 @@ return input.value;
 
 ### `browser_act`
 
-高层交互：`click` / `fill` / `select` / `press` / `check` / `uncheck` / `scroll`。`target` 支持 CSS（默认）、`text=可见文本`、`role=button[name="保存"]`；动作后会等 DOM 安静（settle）再返回 `changed`。
+高层交互：`click` / `fill` / `select` / `press` / `check` / `uncheck` / `scroll`。`target` 支持 scan 返回的 ref（`@e12` 或 `ref=e12`）、CSS（默认）、`text=可见文本`、`role=button[name="保存"]`；动作后会等 DOM 安静（settle，默认静默 100ms、最长 800ms）再返回 `changed`。
 
 ```json
+{ "action": "click", "target": "@e12" }
 { "action": "click", "target": "button#submit-btn" }
 { "action": "fill", "target": "#name-input", "value": "张三" }
 { "action": "fill", "target": "text=搜索", "value": "订单 2024" }
@@ -210,10 +213,11 @@ return input.value;
 { "action": "scroll", "by_y": 600 }
 ```
 
+- `@eN` 来自最近一次 `browser_scan`；页面跳转、列表重渲染或元素被移除后可能失效，此时会返回 `REF_STALE`，重新 scan 取新 ref 即可。
 - `fill` 用原生 `value` setter + `input`/`change` 事件，兼容 React/Vue 受控输入；成功后返回 `result_json` 里的当前值。
 - `press` 支持 `Control/Meta/Alt/Shift+键`；在输入框里按 `Enter` 会额外触发所在表单的 `requestSubmit()`。
 - click 若触发导航，工具会检测 URL 变化并按成功返回；动作后仍建议用 `browser_wait` 明确等待目标状态。
-- 站点若忽略 `isTrusted=false` 的 JS 点击，退回 `browser_cdp` 的 `Input.dispatchMouseEvent`。
+- 默认 settle 上限 800ms；持续重渲染的页面可用 `settle_timeout_ms` 调整。站点若忽略 `isTrusted=false` 的 JS 点击，退回 `browser_cdp` 的 `Input.dispatchMouseEvent`。
 
 ### `browser_wait`
 
@@ -227,7 +231,7 @@ return input.value;
 { "for": "stable", "idle_ms": 300 }
 ```
 
-- `selector` 默认要求元素可见；`text` 可加 `selector` 限定容器；`url` 的 `match` 支持 `includes`/`equals`/`regex`。
+- `selector` 默认要求元素可见；支持 CSS、`text=`、`role=` 与 scan 的 `@eN`；`text` 可加 `selector` 限定容器；`url` 的 `match` 支持 `includes`/`equals`/`regex`。
 - `network_idle` 基于注入的 fetch/XHR 计数器；`idle_ms` 默认 500ms。
 - 超时返回 `status: "timeout"`（不是工具错误），带 `waited_ms` 与提示；可据此决定继续或重试。
 
@@ -244,10 +248,11 @@ return input.value;
 
 ### `browser_screenshot`
 
-`Page.captureScreenshot` 后写入 `screenshotDir`，返回文件路径与字节数。`format` 支持 `png`/`jpeg`，`quality` 仅 JPEG 生效。
+`Page.captureScreenshot` 后写入 `screenshotDir`，返回文件路径、字节数与尺寸。`format` 支持 `png`/`jpeg`，`quality` 仅 JPEG 生效；`full_page=true` 时通过 `Page.getLayoutMetrics` + clip 截取整页。截图前会临时隐藏插件自己的右下角角标，截完恢复。
 
 ```json
 { "format": "jpeg", "quality": 80 }
+{ "full_page": true }
 ```
 
 ## 与 GenericAgent 的差异
@@ -259,7 +264,8 @@ return input.value;
 - 新增 `browser_screenshot` 与 `/demo` 自检页。
 - 新增 `browser_act` 与 `browser_wait`：高层交互、DOM settle、等待 selector/text/url/load_state/network_idle/stable。
 - `navigate` 支持相对 URL 且绝对 URL 原样透传；`open` 等待加载完成再返回 url/title；`agent` 标签页标记与 `close_agent_tabs`；`health` 自检。
-- `browser_scan` 输出输入框当前值/checked/selected/disabled 并过滤插件角标；execute_js 的 DOM diff 改为紧凑摘要。
+- `browser_scan` 输出输入框当前值/checked/selected/disabled 并过滤插件角标；HTML 模式给可交互元素分配稳定 `data-dsh-ref="@eN"`，`browser_act` 可直接引用；`text_only` 也会应用 `cut_list`；execute_js 的 DOM diff 改为紧凑摘要。
+- `browser_screenshot` 支持 `full_page`，截图时隐藏插件角标；`browser_act` 的 settle 默认 100ms 静默/800ms 上限，可按需调整。
 
 ## 测试
 
@@ -270,7 +276,7 @@ node test/plugin.test.mjs
 # 2) 协议：真实 WS 服务 + 模拟扩展（握手、ack/result、注入、scan、CDP、相对 URL、agent tab）
 node test/protocol.test.mjs
 
-# 3) 真机端到端：headless Chrome + 本扩展，扫描/act/wait/监控/标签页/导航/CDP 截图
+# 3) 真机端到端：headless Chrome + 本扩展，扫描/ref/act/wait/监控/标签页/导航/CDP 截图
 node test/e2e-chrome.test.mjs
 ```
 
@@ -294,7 +300,7 @@ ln -sfn "$HOME/workspace/dsh/dsh-remote/node_modules/@deepseek-ai/dsh-tools" nod
 ## 常见问题
 
 **扩展页面不在标签页列表里 / 无法扫描？**
-请确认扩展已更新到 v2.6+ 并在 `chrome://extensions` 里“重新加载”；旧版会过滤掉 `chrome-extension://` 页面。扩展页面的脚本执行走 CDP 兜底，首次调用可能比普通网页慢一点。
+请确认扩展已更新到 v2.8+ 并在 `chrome://extensions` 里“重新加载”；旧版会过滤掉 `chrome-extension://` 页面。扩展页面的脚本执行走 CDP 兜底，首次调用可能比普通网页慢一点。
 
 **扩展未连接？**
 `curl http://127.0.0.1:18865/` 应返回 `{"ok":true,...}`；在 `chrome://extensions` 里重新加载扩展，并查看 Service Worker 控制台是否有 WS 错误。
