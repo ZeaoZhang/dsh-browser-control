@@ -159,9 +159,11 @@ Chrome 不允许扩展 A 控制扩展 B 的 `chrome-extension://` 页面（`chro
 
 ### `browser_scan`
 
-返回经过 token 优化的可见 HTML。`text_only=true` 返回纯文本；`cut_list=true`（默认）裁剪大列表，HTML 与 `text_only` 两种模式都生效；`instruction` 可指定希望保留的列表项关键词；`max_chars` 覆盖默认上限（硬上限：超长时先删减列表/子元素，再压缩文本，保证返回内容不超过约 `max_chars` 字符，并带 `[TRUNCATED]`/`…` 标记）。
+返回经过 token 优化的可见 HTML。`text_only=true` 返回纯文本；`cut_list=true`（默认）裁剪大列表，HTML 与 `text_only` 两种模式都生效；`instruction` 可指定希望保留的列表项关键词；`max_chars` 覆盖默认上限（硬上限，两种模式都生效：HTML 按文档顺序保留整节点、只在文本字符边界截断；`text_only` 优先切在行边界，避免出现 `[INPUT #subscri` 这种半截 token；尾部丢弃的内容以 `[TRUNCATED N chars]` 标出实际字符数，上限极小时退化为 `…`）。
 
 HTML 模式下，可见的可交互元素会带 `data-dsh-ref="@eN"`（如 `@e12`），可直接用于 `browser_act` 的 `target`；同一元素在重新扫描时会复用原 ref，元素被移除/重渲染后旧 ref 失效。`text_only` 模式不产生 ref。
+
+链接与资源地址：`href` 保留真实目标（`http(s)`/`mailto:`/`tel:`/相对路径/锚点都会原样返回，超过 400 字符的才被截断为 `…`），只有 `javascript:`/`data:`/`vbscript:` 这类可执行 scheme 会被替换成 `__link__` 以免被误用；`src`/`action` 等地址同理按长度压缩为 `__url__`。因此 scan 结果里的链接可以直接读、直接交给 `browser_tabs open`。
 
 输入框会输出当前 `value`（password 只标记 `data-filled`），checkbox/radio 输出 `checked`，select 输出 `data-selected`，并保留 `disabled`、`aria-expanded` 等状态；插件自己的右下角角标（`#dsh-browser-badge`）会被过滤。
 
@@ -172,7 +174,7 @@ HTML 模式下，可见的可交互元素会带 `data-dsh-ref="@eN"`（如 `@e12
 
 ### `browser_execute_js`
 
-在页面主世界执行 JS，返回最后一行表达式的值（或显式 `return`），并附带短暂文本、紧凑 DOM diff、新标签页信息。`diff` 形如 `{changed, added, removed, summary: "+2 -1", items: [...]}`，最多列 8 条变化元素，不再回传整段 HTML。
+在页面主世界执行 JS，返回最后一行表达式的值（或显式 `return`），并附带短暂文本、紧凑 DOM diff、新标签页信息。`diff` 形如 `{changed, added, removed, summary: "+2 -1 ~1", items: [...]}`：`~n` 是控件属性值（checkbox `checked`、select `value`、受控输入框）的变化数并计入 `changed`，`items` 里对应条目以 `~` 开头（如 `~ input#subscribe-checkbox true → false`）；最多列 8 条，不再回传整段 HTML。
 
 ```js
 // 点击并读取结果
@@ -217,6 +219,10 @@ return input.value;
 - `fill` 用原生 `value` setter + `input`/`change` 事件，兼容 React/Vue 受控输入；成功后返回 `result_json` 里的当前值。
 - `press` 支持 `Control/Meta/Alt/Shift+键`；在输入框里按 `Enter` 会额外触发所在表单的 `requestSubmit()`。
 - click 若触发导航，工具会检测 URL 变化并按成功返回；动作后仍建议用 `browser_wait` 明确等待目标状态。
+- `target="_blank"` / 命名窗口的链接，以及页面脚本里的 `window.open()`：合成点击没有用户手势，浏览器会把新窗口当弹窗拦截。页面会回报被拦下的目标（链接点击走 `popup` 字段，`window.open` 走 `popups` 数组），工具在没等到新标签页时用 `chrome.tabs.create` 在后台打开（去重、最多 3 个）并写入 `new_tabs`，回执 `hint` 说明是兜底打开的；需要新标签页前台显示时传 `active` 或在之后用 `browser_tabs activate`。
+- `changed` = DOM mutation 数 + 属性值变化数（`dom_changes` / `property_changes` 分开回传）。`check`/`uncheck`、`select`、受控输入框只改 `checked`/`value` 等 property，不产生 mutation，以前会误报“0 处变化”。
+- 回执还带 `state_json`（目标元素当前生效状态，如 `{"checked":false}`、`{"value":"qa","label":"测试"}`）和 `value_changes_json`（本次动作前后状态差异），属性值没变时不会列。
+- `changed` 会统计 `<dialog open>`、`inert`、`aria-modal`、`data-state` 等弹窗/portal 常见属性变化，弹窗已打开不会再误报“0 处变化”。
 - 默认 settle 上限 800ms；持续重渲染的页面可用 `settle_timeout_ms` 调整。站点若忽略 `isTrusted=false` 的 JS 点击，退回 `browser_cdp` 的 `Input.dispatchMouseEvent`。
 
 ### `browser_wait`
@@ -248,7 +254,7 @@ return input.value;
 
 ### `browser_screenshot`
 
-`Page.captureScreenshot` 后写入 `screenshotDir`，返回文件路径、字节数与尺寸。`format` 支持 `png`/`jpeg`，`quality` 仅 JPEG 生效；`full_page=true` 时通过 `Page.getLayoutMetrics` + clip 截取整页。截图前会临时隐藏插件自己的右下角角标，截完恢复。
+`Page.captureScreenshot` 后写入 `screenshotDir`，返回文件路径、字节数与尺寸。`format` 支持 `png`/`jpeg`，`quality` 仅 JPEG 生效；`full_page=true` 时通过 `Page.getLayoutMetrics` + clip 截取整页。截图前会临时隐藏插件自己的右下角角标，截完恢复。整页高度超过 16000px（或总像素超过 6400 万）会直接返回 `[SCREENSHOT_TOO_LARGE]`，不会让 CDP 生成超大图或卡住；此时改用 `full_page=false` 分段截图。
 
 ```json
 { "format": "jpeg", "quality": 80 }
@@ -265,7 +271,12 @@ return input.value;
 - 新增 `browser_act` 与 `browser_wait`：高层交互、DOM settle、等待 selector/text/url/load_state/network_idle/stable。
 - `navigate` 支持相对 URL 且绝对 URL 原样透传；`open` 等待加载完成再返回 url/title；`agent` 标签页标记与 `close_agent_tabs`；`health` 自检。
 - `browser_scan` 输出输入框当前值/checked/selected/disabled 并过滤插件角标；HTML 模式给可交互元素分配稳定 `data-dsh-ref="@eN"`，`browser_act` 可直接引用；`text_only` 也会应用 `cut_list`；execute_js 的 DOM diff 改为紧凑摘要。
-- `browser_screenshot` 支持 `full_page`，截图时隐藏插件角标；`browser_act` 的 settle 默认 100ms 静默/800ms 上限，可按需调整。
+- `browser_screenshot` 支持 `full_page`，截图时隐藏插件角标；整页超长（>16000px 或 >6400 万像素）返回 `[SCREENSHOT_TOO_LARGE]`；`browser_act` 的 settle 默认 100ms 静默/800ms 上限，可按需调整，且 mutation 计数覆盖 `open`/`inert`/`aria-modal`/`data-state` 等弹窗属性。
+- `max_chars` 截断改为按文档顺序保留整节点、只在文本字符边界切分，修复小上限时返回空标签骨架和 `[TRUNCATED 0k chars]` 的回归；`text_only` 同样遵守 `max_chars` 并优先在行边界截断。
+- `browser_act` / execute_js diff 把 checkbox `checked`、select `value`、受控输入框等 property 变化计入 `changed`，回执附带当前状态与生效的值变更。
+- `browser_act` 点击 `target="_blank"` 链接时，因弹窗拦截不会打开新窗口；改为页面回报链接目标、工具用 `chrome.tabs.create` 后台打开并写入 `new_tabs`。
+- `browser_act` 兼容页面脚本里的 `window.open()` 兜底：页面注入轻量包装器记录被弹窗拦截的地址（`popups`），工具同样用 `chrome.tabs.create` 后台打开并在 `hint` 中说明。
+- `browser_scan` 不再把所有超过 30 字符的 `href` 替换成 `__link__`，只屏蔽 `javascript:`/`data:`/`vbscript:` 等可执行 scheme，链接目标对 agent 可读。
 
 ## 测试
 
@@ -300,7 +311,7 @@ ln -sfn "$HOME/workspace/dsh/dsh-remote/node_modules/@deepseek-ai/dsh-tools" nod
 ## 常见问题
 
 **扩展页面不在标签页列表里 / 无法扫描？**
-请确认扩展已更新到 v2.8+ 并在 `chrome://extensions` 里“重新加载”；旧版会过滤掉 `chrome-extension://` 页面。扩展页面的脚本执行走 CDP 兜底，首次调用可能比普通网页慢一点。
+请确认扩展已更新到 v2.9+ 并在 `chrome://extensions` 里“重新加载”；旧版会过滤掉 `chrome-extension://` 页面。扩展页面的脚本执行走 CDP 兜底，首次调用可能比普通网页慢一点。
 
 **扩展未连接？**
 `curl http://127.0.0.1:18865/` 应返回 `{"ok":true,...}`；在 `chrome://extensions` 里重新加载扩展，并查看 Service Worker 控制台是否有 WS 错误。

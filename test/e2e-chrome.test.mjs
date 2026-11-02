@@ -7,7 +7,7 @@ import { cp, mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BrowserDriver } from '../lib/driver.js';
+import { BrowserDriver, delay } from '../lib/driver.js';
 import { registerTools } from '../lib/tools.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -90,7 +90,14 @@ try {
   assert.equal(connected, true, `extension did not connect\nchrome stderr:\n${chromeErr.slice(-4000)}`);
 
   await driver.syncTabs();
-  const tabs = driver.listTabs();
+  let tabs = driver.listTabs();
+  // The extension may announce itself before chrome.tabs reports the startup
+  // URL; give the initial tab a moment to appear instead of racing it.
+  for (let i = 0; i < 50 && !tabs.some((tab) => tab.url.includes('/demo')); i += 1) {
+    await delay(200);
+    await driver.syncTabs();
+    tabs = driver.listTabs();
+  }
   assert.ok(tabs.some((tab) => tab.url.includes('/demo')), `demo tab missing: ${JSON.stringify(tabs)}`);
 
   const target = await driver.resolveTarget({ url: '/demo' });
@@ -116,6 +123,11 @@ try {
   const rescan = await driver.scan(target, { maxChars: 12000, cutList: true });
   assert.equal(refOf(rescan, 'increment-btn'), incrementRef, 'ref changed for the same element across scans');
   assert.ok((rescan.match(/data-dsh-ref=/g) || []).length >= 5, 'too few refs assigned');
+  // Safe destinations must survive the scan; only active-content schemes are
+  // masked, otherwise an agent cannot tell where a link points.
+  assert.match(html, /href="[^"]*ref=related-doc/, 'scan masked a safe link href');
+  assert.ok(html.includes('href="__link__"'), 'javascript: href was not masked');
+  assert.ok(!/href="javascript:/.test(html), 'javascript: href leaked into scan');
   console.log(`scan ok: ${html.length} chars (refs ${incrementRef})`);
 
   // text_only used to return before the cut-list pass, so cut_list was a no-op.
@@ -123,15 +135,37 @@ try {
   assert.ok(text.includes('[FAKE ELEMENT]'), 'text_only scan ignored cut_list');
   assert.ok(text.includes('任务列表'), 'text_only scan missed the list heading');
   assert.ok(!text.includes('第 30 条'), 'cut_list did not hide the tail of the large list');
-  console.log(`text scan ok: ${text.length} chars`);
+  // text_only used to ignore max_chars entirely (300 -> 900+ chars).
+  const textCapped = await driver.scan(target, { textOnly: true, cutList: true, maxChars: 300 });
+  assert.ok(textCapped.length <= 300, `text_only max_chars not enforced: ${textCapped.length}`);
+  assert.ok(textCapped.includes('TRUNCATED') || textCapped.includes('…'), 'text_only cap has no marker');
+  console.log(`text scan ok: ${text.length} chars (capped ${textCapped.length})`);
 
   // --- high-level actions + waits -----------------------------------------
   const fill = await driver.act(target, { action: 'fill', target: '#name-input', value: '韩梅梅' });
   assert.equal(fill.ok, true, `fill failed: ${JSON.stringify(fill)}`);
   assert.equal(fill.value, '韩梅梅');
+  // Escape changes no DOM at all; the receipt must still show the live field
+  // state instead of leaving the caller to guess whether it worked.
+  const escape = await driver.act(target, { action: 'press', target: '#name-input', key: 'Escape' });
+  assert.equal(escape.ok, true, `press failed: ${JSON.stringify(escape)}`);
+  assert.ok(escape.state && escape.state.value === '韩梅梅', `press receipt missed the field state: ${JSON.stringify(escape)}`);
   const select = await driver.act(target, { action: 'select', target: '#role-select', value: 'qa' });
   assert.equal(select.ok, true, `select failed: ${JSON.stringify(select)}`);
   assert.equal(select.value, 'qa');
+  // <select>.value is a property: no DOM mutation, but the action did change
+  // the page and the receipt must say so.
+  assert.ok(select.changed >= 1, `select reported no change: ${JSON.stringify(select)}`);
+  assert.ok(select.propertyChanges >= 1, `select property change not counted: ${JSON.stringify(select)}`);
+  assert.ok(select.state && select.state.value === 'qa', 'select receipt missed the effective value');
+  const uncheck = await driver.act(target, { action: 'uncheck', target: '#subscribe-checkbox' });
+  assert.equal(uncheck.ok, true, `uncheck failed: ${JSON.stringify(uncheck)}`);
+  assert.ok(uncheck.state && uncheck.state.checked === false, 'uncheck receipt missed checked:false');
+  assert.ok(uncheck.changed >= 1, `uncheck reported no change: ${JSON.stringify(uncheck)}`);
+  const recheck = await driver.act(target, { action: 'check', target: '#subscribe-checkbox' });
+  assert.equal(recheck.ok, true, `check failed: ${JSON.stringify(recheck)}`);
+  assert.ok(recheck.state && recheck.state.checked === true, 'check receipt missed checked:true');
+  assert.ok(recheck.changed >= 1, `check reported no change: ${JSON.stringify(recheck)}`);
   const noteFill = await driver.act(target, { action: 'fill', target: '#note-input', value: '已备注' });
   assert.equal(noteFill.ok, true, `textarea fill failed: ${JSON.stringify(noteFill)}`);
   assert.equal(noteFill.value, '已备注');
@@ -180,6 +214,21 @@ try {
   assert.equal(typeof monitor.diff.summary, 'string');
   assert.ok(Array.isArray(monitor.diff.items));
   assert.equal('top_change' in monitor.diff, false, 'monitor should return a compact diff, not raw HTML');
+  // Property flips raise no MutationObserver record; execute_js is often used
+  // to drive controlled inputs, so the monitor diff must still surface them.
+  await driver.monitorStart(target);
+  const flipped = await driver.runScript(target,
+    'const box = document.getElementById("subscribe-checkbox"); box.checked = false; return box.checked');
+  assert.equal(flipped, false);
+  const flipDiff = await driver.monitorFinish(target);
+  assert.ok(flipDiff.diff && flipDiff.diff.changed >= 1, `monitor missed property change: ${JSON.stringify(flipDiff)}`);
+  assert.ok(flipDiff.diff.summary.includes('~1'), `monitor summary missed the property count: ${flipDiff.diff.summary}`);
+  assert.ok(flipDiff.diff.items.some((item) => item.change === '~'), 'monitor did not describe the property change');
+  await driver.monitorStart(target);
+  await driver.runScript(target, 'document.getElementById("subscribe-checkbox").checked = true;');
+  const restoreDiff = await driver.monitorFinish(target);
+  assert.ok(restoreDiff.diff && restoreDiff.diff.changed >= 1 && restoreDiff.diff.summary.includes('~1'),
+    `monitor missed the restored property: ${JSON.stringify(restoreDiff.diff)}`);
   console.log('monitor ok');
 
   // A ref is bound to the element instance: removing it must fail loudly, not
@@ -202,7 +251,15 @@ try {
   const capped = await driver.scan(target, { maxChars: 3000, cutList: false });
   assert.ok(capped.length <= 3000, `max_chars not enforced: ${capped.length}`);
   assert.ok(capped.includes('TRUNCATED') || capped.includes('…'), 'no truncation marker');
-  console.log(`max_chars ok: ${capped.length} chars`);
+  assert.ok(capped.includes('row 0') && capped.includes('填充文本'), `max_chars blanked the content: ${capped.slice(0, 200)}`);
+  // Small budgets used to slice mid-tag, so every element came back empty
+  // (<h3></h3>, <p></p>) with "[TRUNCATED 0k chars]". The tail must be dropped,
+  // not the content.
+  const tiny = await driver.scan(target, { maxChars: 1200, cutList: false });
+  assert.ok(tiny.length <= 1200, `small max_chars not enforced: ${tiny.length}`);
+  assert.ok(tiny.includes('row 0') && tiny.includes('填充文本'), `small max_chars returned a skeleton: ${tiny.slice(0, 300)}`);
+  assert.ok(!/<(h3|p|section)[^>]*><\/\1>/.test(tiny), `small max_chars emptied elements: ${tiny.slice(0, 300)}`);
+  console.log(`max_chars ok: ${capped.length} chars (tiny ${tiny.length})`);
 
   // --- tabs ---------------------------------------------------------------
   const created = await driver.newTab(`http://127.0.0.1:${PORT}/demo?second=1`, true);
@@ -238,6 +295,16 @@ try {
   assert.equal(await driver.runScript(target, 'return location.search'), '?rel=1&two=2');
   console.log('navigate ok');
 
+  // A <dialog>.showModal() only flips the `open` attribute. The settle observer
+  // must count that, otherwise the action receipt says "0 changes" even though
+  // the modal clearly opened.
+  const dialogOpen = await driver.act(target, { action: 'click', target: '#open-dialog-btn' });
+  assert.equal(dialogOpen.ok, true, `dialog click failed: ${JSON.stringify(dialogOpen)}`);
+  assert.ok(dialogOpen.changed >= 1, `dialog open reported ${dialogOpen.changed} DOM changes`);
+  assert.equal(await driver.runScript(target, 'return document.getElementById("confirm-dialog").open'), true);
+  await driver.runScript(target, 'document.getElementById("confirm-dialog").close()');
+  console.log('dialog settle ok');
+
   // --- CDP + screenshot ---------------------------------------------------
   const shot = await driver.cdp(target, 'Page.captureScreenshot', { format: 'png' });
   assert.ok(shot && typeof shot.data === 'string' && shot.data.length > 1000, 'screenshot returned no base64 data');
@@ -271,6 +338,88 @@ try {
   }))()`);
   assert.equal(badgeState.pending, 0, 'badge visibility marker was not cleaned up');
   assert.equal(badgeState.hidden, 0, 'badge stayed hidden after screenshot');
+
+  // A 17k-pixel-tall page must fail fast with a clear code rather than making
+  // CDP allocate an oversized capture.
+  await driver.runScript(target, `document.body.innerHTML = '<div id="tall" style="height:17000px"></div>'; return document.body.scrollHeight`);
+  const tooLong = await tools.get('browser_screenshot').execute(
+    { tab_id: target.tab.id, full_page: true },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(tooLong.status, 'error', `tall page screenshot unexpectedly succeeded: ${JSON.stringify(tooLong)}`);
+  assert.match(tooLong.error, /SCREENSHOT_TOO_LARGE/);
+  console.log('long page guard ok');
+
+  // --- links: safe hrefs, javascript: masking, target=_blank clicks -------
+  await driver.runScript(target, `document.body.innerHTML = [
+    '<a id="blank-link" href="/demo?ref=related-doc&from=blank-link" target="_blank">新窗口</a>',
+    '<a id="script-link" href="javascript:void(0)">脚本链接</a>'
+  ].join(''); return document.body.innerHTML.length`);
+  const linkScan = await tools.get('browser_scan').execute(
+    { tab_id: target.tab.id, max_chars: 4000 },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(linkScan.status, 'success', linkScan.error);
+  assert.match(linkScan.content, /href="[^"]*ref=related-doc/, 'safe href was masked in scan');
+  assert.ok(linkScan.content.includes('href="__link__"'), 'javascript: href was not masked');
+  const tabIdsBefore = new Set(driver.listTabs().map((tab) => tab.tab_id));
+  const blankClick = await tools.get('browser_act').execute(
+    { tab_id: target.tab.id, action: 'click', target: '#blank-link' },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(blankClick.status, 'success', `target=_blank click failed: ${JSON.stringify(blankClick)}`);
+  assert.equal(blankClick.new_tabs.length, 1,
+    `target=_blank click opened ${blankClick.new_tabs.length} tabs: ${JSON.stringify(blankClick.new_tabs)}`);
+  assert.match(blankClick.new_tabs[0].url, /from=blank-link/);
+  assert.match(blankClick.hint, /新标签页/);
+  const openedId = blankClick.new_tabs[0].tab_id;
+  assert.ok(!tabIdsBefore.has(openedId), 'new_tabs contained a pre-existing tab');
+  // The action ran on the original page, so the default target must not follow
+  // the background tab it opened.
+  assert.equal(driver.current?.tab?.id, target.tab.id, 'current tab moved to the background popup');
+  await driver.closeTab({ conn: target.conn, tab: { id: openedId } }).catch(() => {});
+  console.log(`link ok: opened tab ${openedId} (${blankClick.new_tabs[0].url})`);
+
+  // window.open() is blocked by the same popup blocker; the page tap reports it
+  // and the tool opens it instead of silently doing nothing.
+  await driver.runScript(target, `(() => {
+    document.body.innerHTML = '<button id="blank-js-btn" type="button">JS 新窗口</button>';
+    document.getElementById('blank-js-btn').addEventListener('click', () => {
+      window.open('/demo?ref=js-open&from=window-open', '_blank');
+    });
+    return 1;
+  })()`);
+  const jsClick = await tools.get('browser_act').execute(
+    { tab_id: target.tab.id, action: 'click', target: '#blank-js-btn' },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(jsClick.status, 'success', `window.open click failed: ${JSON.stringify(jsClick)}`);
+  assert.equal(jsClick.new_tabs.length, 1,
+    `window.open click opened ${jsClick.new_tabs.length} tabs: ${JSON.stringify(jsClick.new_tabs)}`);
+  assert.match(jsClick.new_tabs[0].url, /from=window-open/);
+  assert.match(jsClick.hint, /window\.open\(\)/);
+  await driver.closeTab({ conn: target.conn, tab: { id: jsClick.new_tabs[0].tab_id } }).catch(() => {});
+  console.log(`window.open ok: opened tab ${jsClick.new_tabs[0].tab_id} (${jsClick.new_tabs[0].url})`);
+
+  // window.open blocked + page falls back to navigating the same tab: the popup
+  // fallback must not open a duplicate background tab for the same URL.
+  await driver.runScript(target, `(() => {
+    document.body.innerHTML = '<button id="fallback-btn" type="button">回退同标签</button>';
+    document.getElementById('fallback-btn').addEventListener('click', () => {
+      const opened = window.open('/demo?ref=blocked-popup', '_blank');
+      if (!opened) history.replaceState(null, '', '/demo?ref=blocked-popup&from=same-tab');
+    });
+    return 1;
+  })()`);
+  const fallbackClick = await tools.get('browser_act').execute(
+    { tab_id: target.tab.id, action: 'click', target: '#fallback-btn' },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(fallbackClick.status, 'success', `same-tab fallback click failed: ${JSON.stringify(fallbackClick)}`);
+  assert.equal(fallbackClick.new_tabs.length, 0,
+    `same-tab fallback duplicated the popup: ${JSON.stringify(fallbackClick.new_tabs)}`);
+  await driver.runScript(target, `history.replaceState(null, '', '/demo?restored=1')`);
+  console.log('same-tab fallback ok');
   console.log('screenshot ok');
   console.log('cdp ok');
 
@@ -282,7 +431,7 @@ try {
   assert.ok(extTab, `extension page missing from tabs: ${JSON.stringify(driver.listTabs())}`);
   const extTarget = await driver.resolveTarget({ tab_id: extTab.tab_id });
   const extVersion = await driver.runScript(extTarget, 'return window.__DSH_BROWSER__ ? window.__DSH_BROWSER__.version : null');
-  assert.equal(extVersion, 6);
+  assert.equal(extVersion, 11);
   const extHtml = await driver.scan(extTarget, { maxChars: 4000 });
   assert.ok(/Cookies|浏览器服务|DSH/.test(extHtml), `unexpected extension page scan: ${extHtml.slice(0, 300)}`);
   const extShot = await driver.cdp(extTarget, 'Page.captureScreenshot', { format: 'png' });

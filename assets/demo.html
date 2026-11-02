@@ -66,6 +66,14 @@
     </dialog>
   </section>
 
+  <section id="link-section">
+    <h2>链接（新窗口与安全 scheme）</h2>
+    <p class="muted">新窗口链接在扫描里保留完整 href；合成点击没有用户手势，插件会用 chrome.tabs.create 兜底。</p>
+    <a id="blank-link" href="/demo?ref=related-doc&from=blank-link&kind=new-window" target="_blank" rel="noopener">查看相关文档（新窗口）</a>
+    <a id="script-link" href="javascript:void(0)">脚本链接（扫描应显示 __link__）</a>
+    <button id="blank-js-btn" type="button">JS 新窗口（window.open）</button>
+  </section>
+
   <section id="list-section">
     <h2>任务列表（用于测试列表裁剪）</h2>
     <ul id="task-list">
@@ -106,6 +114,9 @@
   <script>
     const countEl = document.getElementById('count');
     let count = 0;
+    document.getElementById('blank-js-btn').addEventListener('click', () => {
+      window.open('/demo?ref=js-open&from=window-open', '_blank');
+    });
     document.getElementById('increment-btn').addEventListener('click', () => { count += 1; countEl.textContent = String(count); });
     document.getElementById('reset-btn').addEventListener('click', () => { count = 0; countEl.textContent = '0'; });
 
