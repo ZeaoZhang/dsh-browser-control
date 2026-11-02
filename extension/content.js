@@ -3,10 +3,14 @@
 // Remove meta CSP tags
 document.querySelectorAll('meta[http-equiv="Content-Security-Policy"]').forEach(e => e.remove());
 
-// Indicator badge at bottom-right (userscript style)
+// Indicator badge at bottom-right (userscript style). Mark it as plugin UI so
+// browser_scan can ignore it instead of leaking "ljq_driver: 已连接" into every
+// page snapshot.
 (function(){
   if(window.self!==window.top)return;
   const d=document.createElement('div');
+  d.id='dsh-browser-badge';
+  d.setAttribute('data-dsh-ui','1');
   d.textContent='ljq_driver: 已连接';
   d.style.cssText='position:fixed;bottom:8px;right:8px;background:#4CAF50;color:white;padding:4px 7px;border-radius:4px;font-size:11px;font-weight:bold;z-index:99999;box-shadow:0 2px 4px rgba(0,0,0,0.2);opacity:0.2;pointer-events:none;';
   const S={connected:['已连接','#4CAF50'],connecting:['重连中','#FF9800'],disconnected:['断开','#F44336']};

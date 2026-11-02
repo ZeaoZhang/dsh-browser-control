@@ -1,7 +1,7 @@
 {
   "name": "dsh-browser-control",
-  "version": "0.1.0",
-  "description": "Chrome browser-control plugin for DeepSeek Harness: scan token-optimized page HTML, execute JS, drive tabs and CDP. Extracted from GenericAgent's TMWebDriver / simphtml.",
+  "version": "0.2.0",
+  "description": "Chrome browser-control plugin for DeepSeek Harness: scan token-optimized page HTML, act on elements, wait for UI state, execute JS, drive tabs and CDP. Extracted from GenericAgent's TMWebDriver / simphtml.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

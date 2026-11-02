@@ -101,7 +101,10 @@ async function handleExtMessage(msg, sender) {
           windowId: msg.windowId,
           openerTabId: msg.openerTabId
         });
-        return { ok: true, data: { id: tab.id, url: tab.url, title: tab.title } };
+        // chrome.tabs.create returns before the URL/title are populated; wait
+        // briefly so callers get a usable url/title instead of an empty string.
+        const ready = await waitForTabReady(tab.id, 5000);
+        return { ok: true, data: ready || { id: tab.id, url: tab.pendingUrl || tab.url || msg.url, title: tab.title || '', status: tab.status } };
       }
       if (msg.method === 'switch') {
         const tab = await chrome.tabs.update(msg.tabId, { active: true });
@@ -232,6 +235,24 @@ async function handleCDP(msg, sender) {
     return { ok: false, error: e.message };
   }
 }
+async function waitForTabReady(tabId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    try {
+      last = await chrome.tabs.get(tabId);
+      if (last && last.status === 'complete' && last.url) {
+        return { id: last.id, url: last.url, title: last.title || '', status: last.status, windowId: last.windowId, active: last.active };
+      }
+    } catch (e) {
+      return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!last) return null;
+  return { id: last.id, url: last.url || last.pendingUrl || '', title: last.title || '', status: last.status, windowId: last.windowId, active: last.active };
+}
+
 // http(s)/file/extension pages are controllable (extension pages go through
 // the chrome.debugger CDP fallback because chrome.scripting refuses them).
 // chrome:// and other internal browser pages stay out of the tab list.

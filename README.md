@@ -1,6 +1,6 @@
 # dsh-browser-control
 
-把 [GenericAgent](https://github.com/lsdefine/GenericAgent) 的浏览器控制能力（`TMWebDriver` + `simphtml` + `tmwd_cdp_bridge` 扩展）抽取为 **DeepSeek Harness** 的独立插件：一个无第三方依赖的本地 WebSocket 服务 + 一个 Chrome MV3 扩展 + 五个 DSH 工具。
+把 [GenericAgent](https://github.com/lsdefine/GenericAgent) 的浏览器控制能力（`TMWebDriver` + `simphtml` + `tmwd_cdp_bridge` 扩展）抽取为 **DeepSeek Harness** 的独立插件：一个无第三方依赖的本地 WebSocket 服务 + 一个 Chrome MV3 扩展 + 七个 DSH 工具。
 
 - **无 Python 依赖**：WS 服务用 Node `node:http` 手写 RFC 6455，不需要 `ws` 包；HTML 优化/列表裁剪/变化监控逻辑整体移植到浏览器端 JS。
 - **协议兼容**：沿用 GenericAgent 的 `ext_ready` / `tabs_update` / `ack` / `result` / `error` 消息格式，可直接使用原版 `tmwd_cdp_bridge` 扩展；仓库内附带改进版扩展。
@@ -12,7 +12,7 @@
 
 ```
 DSH 会话 / 模型
-   │  browser_tabs / browser_scan / browser_execute_js / browser_cdp / browser_screenshot
+   │  browser_tabs / browser_scan / browser_execute_js / browser_act / browser_wait / browser_cdp / browser_screenshot
    ▼
 lib/index.js  ── 注册工具 ──▶ lib/tools.js
    │                              │
@@ -20,15 +20,15 @@ lib/index.js  ── 注册工具 ──▶ lib/tools.js
 lib/driver.js  ◀──────  WebSocket 127.0.0.1:18865  ──────▶  Chrome 扩展
    │  同一端口提供 HTTP：GET /（扩展探活）、GET /demo（自检页）      background.js
    ▼                                                              │ chrome.scripting / chrome.debugger
-页面内注入 window.__DSH_BROWSER__ { scan, startMonitor, finishMonitor } ◀┘
+页面内注入 window.__DSH_BROWSER__ { scan, startMonitor, finishMonitor, act, waitFor, settle } ◀┘
 ```
 
 - `lib/ws.js`：RFC 6455 服务端实现（握手、掩码、分片、ping/pong、close）。
-- `lib/driver.js`：连接管理、标签页注册、请求/响应关联、页面注入、`scan` / `runScript` / `monitorStart` / `monitorFinish` / `cdp` / 标签页操作。
-- `lib/page/`：`opt_html.js` 与 `find_main_list.js` 从 GenericAgent 原样提取（`tools/import-from-genericagent.mjs`）；`scan_runtime.js` 是在浏览器里运行的优化、裁剪、截断、diff 实现。
-- `lib/tools.js`：五个 DSH 工具定义（`defineTool`）。
+- `lib/driver.js`：连接管理、标签页注册、请求/响应关联、页面注入、`scan` / `runScript` / `monitorStart` / `monitorFinish` / `act` / `waitFor` / `cdp` / 标签页操作；导航前解析相对 URL，绝对 URL 原样透传。
+- `lib/page/`：`opt_html.js` 与 `find_main_list.js` 从 GenericAgent 原样提取（`tools/import-from-genericagent.mjs`）；`scan_runtime.js` 是在浏览器里运行的优化、裁剪、截断、diff 实现；`actions.js` 提供高层交互、等待与 DOM 稳定检测。
+- `lib/tools.js`：七个 DSH 工具定义（`defineTool`）。
 - `extension/`：MV3 扩展。`config.js` 里的 `WS_PORT` 必须与插件配置一致。
-- `assets/demo.html`：`/demo` 自检页（计数器、表单、弹窗、30 条长列表），用于快速验证 scan/execute/screenshot。
+- `assets/demo.html`：`/demo` 自检页（计数器、表单、弹窗、异步按钮、30 条长列表），用于快速验证 scan/act/wait/execute/screenshot。
 
 ## 目录
 
@@ -37,7 +37,7 @@ dsh-browser-control/
 ├── lib/
 │   ├── index.js          # 插件入口：Config + apply
 │   ├── driver.js         # WS/HTTP 服务 + 浏览器会话
-│   ├── tools.js          # 5 个工具
+│   ├── tools.js          # 7 个工具
 │   ├── ws.js             # 无依赖 WebSocket 服务端
 │   └── page/             # 注入浏览器的扫描运行时
 ├── extension/            # Chrome MV3 扩展（加载这个目录）
@@ -113,10 +113,19 @@ GenericAgent 的 `TMWebDriver` 默认监听 **18765**（HTTP 在 18766），本�
 
 ```json
 { "action": "list" }
+{ "action": "list", "scope": "agent" }
 { "action": "open", "url": "https://example.com", "active": true }
 { "action": "navigate", "tab_id": 123, "url": "https://example.com/login" }
+{ "action": "navigate", "tab_id": 123, "url": "/knowledge/?status=reviewed&td_key=2026102000179" }
 { "action": "close", "tab_id": 123 }
+{ "action": "close_agent_tabs" }
+{ "action": "health" }
 ```
+
+- `navigate` 的绝对 URL 原样透传，`&` 不会被二次编码；相对 URL 以当前页为基准解析，也支持 `?a=1&b=2`。
+- `open` 会等到标签页 `status=complete` 再返回，`new_tab_json` 里有可用的 `url`/`title`。
+- `scope` 只影响 `list`；由本插件打开的标签页会标记 `agent: true`，`close_agent_tabs` 只关这些（浏览器至少保留一个标签页）。
+- `health` 返回服务/扩展/标签页的自检结果与修复提示。
 
 > 导航会销毁页面上下文，必须作为独立调用；脚本里不要 `location.href = ...` 之后继续执行。
 
@@ -152,6 +161,8 @@ Chrome 不允许扩展 A 控制扩展 B 的 `chrome-extension://` 页面（`chro
 
 返回经过 token 优化的可见 HTML。`text_only=true` 返回纯文本；`cut_list=true`（默认）裁剪大列表；`instruction` 可指定希望保留的列表项关键词；`max_chars` 覆盖默认上限（硬上限：超长时先删减列表/子元素，再压缩文本，保证返回内容不超过约 `max_chars` 字符，并带 `[TRUNCATED]`/`…` 标记）。
 
+输入框会输出当前 `value`（password 只标记 `data-filled`），checkbox/radio 输出 `checked`，select 输出 `data-selected`，并保留 `disabled`、`aria-expanded` 等状态；插件自己的右下角角标（`#dsh-browser-badge`）会被过滤。
+
 ```json
 { "text_only": true, "max_chars": 12000 }
 { "cut_list": true, "instruction": "订单 2024" }
@@ -159,7 +170,7 @@ Chrome 不允许扩展 A 控制扩展 B 的 `chrome-extension://` 页面（`chro
 
 ### `browser_execute_js`
 
-在页面主世界执行 JS，返回最后一行表达式的值（或显式 `return`），并附带短暂文本、DOM diff、新标签页信息。
+在页面主世界执行 JS，返回最后一行表达式的值（或显式 `return`），并附带短暂文本、紧凑 DOM diff、新标签页信息。`diff` 形如 `{changed, added, removed, summary: "+2 -1", items: [...]}`，最多列 8 条变化元素，不再回传整段 HTML。
 
 ```js
 // 点击并读取结果
@@ -182,6 +193,43 @@ return input.value;
 - 敏感操作（文件上传、`isTrusted` 事件、坐标点击）优先 `browser_cdp`；
 - 导航请用 `browser_tabs` 的 `navigate`；
 - 后台标签页会被 Chrome 节流，计时器与监控可能延迟，尽量让目标页在前台。
+
+### `browser_act`
+
+高层交互：`click` / `fill` / `select` / `press` / `check` / `uncheck` / `scroll`。`target` 支持 CSS（默认）、`text=可见文本`、`role=button[name="保存"]`；动作后会等 DOM 安静（settle）再返回 `changed`。
+
+```json
+{ "action": "click", "target": "button#submit-btn" }
+{ "action": "fill", "target": "#name-input", "value": "张三" }
+{ "action": "fill", "target": "text=搜索", "value": "订单 2024" }
+{ "action": "select", "target": "#role-select", "value": "qa" }
+{ "action": "press", "target": "#search", "key": "Enter" }
+{ "action": "press", "key": "Escape" }
+{ "action": "check", "target": "#subscribe-checkbox" }
+{ "action": "scroll", "target": "text=加载更多" }
+{ "action": "scroll", "by_y": 600 }
+```
+
+- `fill` 用原生 `value` setter + `input`/`change` 事件，兼容 React/Vue 受控输入；成功后返回 `result_json` 里的当前值。
+- `press` 支持 `Control/Meta/Alt/Shift+键`；在输入框里按 `Enter` 会额外触发所在表单的 `requestSubmit()`。
+- click 若触发导航，工具会检测 URL 变化并按成功返回；动作后仍建议用 `browser_wait` 明确等待目标状态。
+- 站点若忽略 `isTrusted=false` 的 JS 点击，退回 `browser_cdp` 的 `Input.dispatchMouseEvent`。
+
+### `browser_wait`
+
+等待页面达到指定状态，避免用连续 `browser_scan` 轮询。`for` 支持 `selector` / `text` / `url` / `load_state` / `network_idle` / `stable`。
+
+```json
+{ "for": "selector", "selector": "#result", "timeout_ms": 8000 }
+{ "for": "text", "text": "保存成功", "selector": "#toast" }
+{ "for": "url", "url": "/knowledge", "match": "includes" }
+{ "for": "load_state", "state": "networkidle" }
+{ "for": "stable", "idle_ms": 300 }
+```
+
+- `selector` 默认要求元素可见；`text` 可加 `selector` 限定容器；`url` 的 `match` 支持 `includes`/`equals`/`regex`。
+- `network_idle` 基于注入的 fetch/XHR 计数器；`idle_ms` 默认 500ms。
+- 超时返回 `status: "timeout"`（不是工具错误），带 `waited_ms` 与提示；可据此决定继续或重试。
 
 ### `browser_cdp`
 
@@ -209,17 +257,20 @@ return input.value;
 - 保留了原版协议的向后兼容：原 `tmwd_cdp_bridge` 扩展可以直接连接本服务（没有 `active` 字段时按首个标签页回退）。
 - 仓库内扩展相对原版：`config.js` 抽离端口、`ext_ready`/`tabs_update` 带 `active`/`windowId`、`tabs` 命令新增 `close`/`navigate`、修复“同一行既有操作又有 `return`”时自动加 `return` 导致返回值丢失的问题。
 - 新增 `browser_screenshot` 与 `/demo` 自检页。
+- 新增 `browser_act` 与 `browser_wait`：高层交互、DOM settle、等待 selector/text/url/load_state/network_idle/stable。
+- `navigate` 支持相对 URL 且绝对 URL 原样透传；`open` 等待加载完成再返回 url/title；`agent` 标签页标记与 `close_agent_tabs`；`health` 自检。
+- `browser_scan` 输出输入框当前值/checked/selected/disabled 并过滤插件角标；execute_js 的 DOM diff 改为紧凑摘要。
 
 ## 测试
 
 ```bash
-# 1) 插件装配：Config、五个工具注册、无扩展时的提示
+# 1) 插件装配：Config、七个工具注册、无扩展时的提示
 node test/plugin.test.mjs
 
-# 2) 协议：真实 WS 服务 + 模拟扩展（握手、ack/result、注入、scan、CDP）
+# 2) 协议：真实 WS 服务 + 模拟扩展（握手、ack/result、注入、scan、CDP、相对 URL、agent tab）
 node test/protocol.test.mjs
 
-# 3) 真机端到端：headless Chrome + 本扩展，扫描/点击/await/监控/标签页/导航/CDP 截图
+# 3) 真机端到端：headless Chrome + 本扩展，扫描/act/wait/监控/标签页/导航/CDP 截图
 node test/e2e-chrome.test.mjs
 ```
 
@@ -243,7 +294,7 @@ ln -sfn "$HOME/workspace/dsh/dsh-remote/node_modules/@deepseek-ai/dsh-tools" nod
 ## 常见问题
 
 **扩展页面不在标签页列表里 / 无法扫描？**
-请确认扩展已更新到 v2.5+ 并在 `chrome://extensions` 里“重新加载”；旧版会过滤掉 `chrome-extension://` 页面。扩展页面的脚本执行走 CDP 兜底，首次调用可能比普通网页慢一点。
+请确认扩展已更新到 v2.6+ 并在 `chrome://extensions` 里“重新加载”；旧版会过滤掉 `chrome-extension://` 页面。扩展页面的脚本执行走 CDP 兜底，首次调用可能比普通网页慢一点。
 
 **扩展未连接？**
 `curl http://127.0.0.1:18865/` 应返回 `{"ok":true,...}`；在 `chrome://extensions` 里重新加载扩展，并查看 Service Worker 控制台是否有 WS 错误。
@@ -258,7 +309,7 @@ GenericAgent 默认占用 18765/18766，本插件默认 18865，通常不会冲�
 `browser_scan` 只保留可见元素；折叠、`display:none`、被遮挡的内容不会出现。可临时用 `browser_execute_js` 读取 `outerHTML` 或改用 `browser_cdp`。
 
 **点击没反应？**
-JS `click()` 产生的事件 `isTrusted=false`，部分站点会忽略；改用 `browser_cdp` 的 `Input.dispatchMouseEvent`（坐标用 `getBoundingClientRect`）。
+先用 `browser_act` 的 `click`（带 settle）重试；若站点忽略 `isTrusted=false` 的事件，改用 `browser_cdp` 的 `Input.dispatchMouseEvent`（坐标用 `getBoundingClientRect`）。
 
 **monitor 没抓到提示？**
 提示文本存在时间若短于 450ms 可能漏掉；后台标签页也会被节流。可把页面切到前台或直接在脚本里 `return` 等待后的结果。

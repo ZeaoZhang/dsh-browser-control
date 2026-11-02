@@ -99,14 +99,47 @@ try {
   assert.ok(html.includes('自检页面') || html.includes('DSH Browser Control'), 'scan misses page heading');
   assert.ok(html.includes('increment-btn') || html.includes('点击 +1'), 'scan misses interactive button');
   assert.ok(html.includes('[FAKE ELEMENT]'), 'large list was not cut down');
+  assert.ok(html.includes('value="李雷"'), 'scan should expose the current input value');
+  assert.ok(html.includes('默认备注'), 'scan should expose textarea content');
+  assert.ok(html.includes('checked'), 'scan should expose checkbox checked state');
+  assert.ok(!html.includes('ljq_driver'), 'plugin status badge leaked into scan');
   console.log(`scan ok: ${html.length} chars`);
+
+  // --- high-level actions + waits -----------------------------------------
+  const fill = await driver.act(target, { action: 'fill', target: '#name-input', value: '韩梅梅' });
+  assert.equal(fill.ok, true, `fill failed: ${JSON.stringify(fill)}`);
+  assert.equal(fill.value, '韩梅梅');
+  const select = await driver.act(target, { action: 'select', target: '#role-select', value: 'qa' });
+  assert.equal(select.ok, true, `select failed: ${JSON.stringify(select)}`);
+  assert.equal(select.value, 'qa');
+  const noteFill = await driver.act(target, { action: 'fill', target: '#note-input', value: '已备注' });
+  assert.equal(noteFill.ok, true, `textarea fill failed: ${JSON.stringify(noteFill)}`);
+  assert.equal(noteFill.value, '已备注');
+  const submitted = await driver.act(target, { action: 'click', target: '#submit-btn' });
+  assert.equal(submitted.ok, true, `click failed: ${JSON.stringify(submitted)}`);
+  const formWait = await driver.waitFor(target, { for: 'text', text: '已提交：韩梅梅 / qa', timeoutMs: 3000 });
+  assert.equal(formWait.ok, true, `form text wait failed: ${JSON.stringify(formWait)}`);
+
+  const clickIncrement = await driver.act(target, { action: 'click', target: '#increment-btn' });
+  assert.equal(clickIncrement.ok, true, `increment click failed: ${JSON.stringify(clickIncrement)}`);
+  assert.ok(clickIncrement.changed >= 1, 'click did not report DOM changes');
+  assert.equal(await driver.runScript(target, 'return document.getElementById("count").textContent'), '1');
+
+  const asyncClick = await driver.act(target, { action: 'click', target: '#async-btn' });
+  assert.equal(asyncClick.ok, true, `async click failed: ${JSON.stringify(asyncClick)}`);
+  const asyncWait = await driver.waitFor(target, { for: 'text', text: '加载完成', timeoutMs: 4000 });
+  assert.equal(asyncWait.ok, true, `async text wait failed: ${JSON.stringify(asyncWait)}`);
+  const missingWait = await driver.waitFor(target, { for: 'selector', selector: '#not-there', timeoutMs: 300 });
+  assert.equal(missingWait.ok, false);
+  assert.equal(missingWait.code, 'WAIT_TIMEOUT');
+  console.log('act/wait ok');
 
   // --- execute JS ---------------------------------------------------------
   const initial = await driver.runScript(target, 'return document.getElementById("count").textContent');
-  assert.equal(initial, '0');
+  assert.equal(initial, '1');
   const afterClick = await driver.runScript(target,
     'document.getElementById("increment-btn").click(); return document.getElementById("count").textContent');
-  assert.equal(afterClick, '1');
+  assert.equal(afterClick, '2');
 
   const asyncValue = await driver.runScript(target,
     'return await new Promise((resolve) => setTimeout(() => resolve("awaited"), 50))');
@@ -120,6 +153,9 @@ try {
   const monitor = await driver.monitorFinish(target);
   assert.ok(JSON.stringify(monitor.transients).includes('加载'), `monitor missed transient text: ${JSON.stringify(monitor)}`);
   assert.ok(monitor.diff && monitor.diff.changed >= 1, 'monitor diff empty');
+  assert.equal(typeof monitor.diff.summary, 'string');
+  assert.ok(Array.isArray(monitor.diff.items));
+  assert.equal('top_change' in monitor.diff, false, 'monitor should return a compact diff, not raw HTML');
   console.log('monitor ok');
 
   // --- max_chars hard cap -------------------------------------------------
@@ -136,21 +172,35 @@ try {
   // --- tabs ---------------------------------------------------------------
   const created = await driver.newTab(`http://127.0.0.1:${PORT}/demo?second=1`, true);
   assert.ok(created && created.id, 'tab create returned no id');
+  assert.ok(String(created.url || '').includes('second=1'), `tab create returned no url: ${JSON.stringify(created)}`);
+  assert.ok(String(created.title || '').length > 0, `tab create returned no title: ${JSON.stringify(created)}`);
   await new Promise((resolve) => setTimeout(resolve, 300));
   await driver.syncTabs();
   assert.ok(driver.listTabs().length >= 2, 'second tab not registered');
+  assert.equal(driver.listTabs().find((tab) => tab.tab_id === created.id)?.agent, true, 'new tab not marked agent-owned');
   const second = await driver.resolveTarget({ tab_id: created.id });
   await driver.closeTab(second);
   await new Promise((resolve) => setTimeout(resolve, 300));
   await driver.syncTabs();
   assert.equal(driver.listTabs().some((tab) => tab.tab_id === created.id), false, 'tab still listed after close');
+
+  const health = driver.health();
+  assert.equal(health.ok, true);
+  assert.equal(health.extension.connected, true);
+  assert.ok(health.tabs.total >= 1);
   console.log('tabs ok');
 
   // --- navigate -----------------------------------------------------------
-  await driver.navigate(target, `http://127.0.0.1:${PORT}/demo?navigated=1`);
-  await new Promise((resolve) => setTimeout(resolve, 1200));
-  const navigated = await driver.runScript(target, 'return location.search');
-  assert.equal(navigated, '?navigated=1');
+  // Relative URLs are resolved, and the query string must arrive byte-for-byte
+  // (the original bug encoded "&" as "%26").
+  const rawUrl = `http://127.0.0.1:${PORT}/demo?status=reviewed&td_key=2026102000179`;
+  const navigated = await driver.navigate(target, rawUrl);
+  assert.equal(navigated.url, rawUrl);
+  assert.equal(await driver.runScript(target, 'return location.search'), '?status=reviewed&td_key=2026102000179');
+
+  const relative = await driver.navigate(target, '/demo?rel=1&two=2');
+  assert.equal(relative.url, `http://127.0.0.1:${PORT}/demo?rel=1&two=2`);
+  assert.equal(await driver.runScript(target, 'return location.search'), '?rel=1&two=2');
   console.log('navigate ok');
 
   // --- CDP + screenshot ---------------------------------------------------
@@ -171,7 +221,7 @@ try {
   assert.ok(extTab, `extension page missing from tabs: ${JSON.stringify(driver.listTabs())}`);
   const extTarget = await driver.resolveTarget({ tab_id: extTab.tab_id });
   const extVersion = await driver.runScript(extTarget, 'return window.__DSH_BROWSER__ ? window.__DSH_BROWSER__.version : null');
-  assert.equal(extVersion, 3);
+  assert.equal(extVersion, 5);
   const extHtml = await driver.scan(extTarget, { maxChars: 4000 });
   assert.ok(/Cookies|浏览器服务|DSH/.test(extHtml), `unexpected extension page scan: ${extHtml.slice(0, 300)}`);
   const extShot = await driver.cdp(extTarget, 'Page.captureScreenshot', { format: 'png' });
