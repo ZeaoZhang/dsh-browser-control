@@ -1,6 +1,6 @@
 # dsh-browser-control
 
-把 [GenericAgent](https://github.com/lsdefine/GenericAgent) 的浏览器控制能力（`TMWebDriver` + `simphtml` + `tmwd_cdp_bridge` 扩展）抽取为 **DeepSeek Harness** 的独立插件：一个无第三方依赖的本地 WebSocket 服务 + 一个 Chrome MV3 扩展 + 七个 DSH 工具。
+把 [GenericAgent](https://github.com/lsdefine/GenericAgent) 的浏览器控制能力（`TMWebDriver` + `simphtml` + `tmwd_cdp_bridge` 扩展）抽取为 **DeepSeek Harness** 的独立插件：一个无第三方依赖的本地 WebSocket 服务 + 一个 Chrome MV3 扩展 + 九个 DSH 工具。
 
 - **无 Python 依赖**：WS 服务用 Node `node:http` 手写 RFC 6455，不需要 `ws` 包；HTML 优化/列表裁剪/变化监控逻辑整体移植到浏览器端 JS。
 - **协议兼容**：沿用 GenericAgent 的 `ext_ready` / `tabs_update` / `ack` / `result` / `error` 消息格式，可直接使用原版 `tmwd_cdp_bridge` 扩展；仓库内附带改进版扩展。
@@ -12,7 +12,7 @@
 
 ```
 DSH 会话 / 模型
-   │  browser_tabs / browser_scan / browser_execute_js / browser_act / browser_wait / browser_cdp / browser_screenshot
+   │  browser_tabs / browser_scan / browser_execute_js / browser_act / browser_upload / browser_download / browser_wait / browser_cdp / browser_screenshot
    ▼
 lib/index.js  ── 注册工具 ──▶ lib/tools.js
    │                              │
@@ -26,9 +26,9 @@ lib/driver.js  ◀──────  WebSocket 127.0.0.1:18865  ─────
 - `lib/ws.js`：RFC 6455 服务端实现（握手、掩码、分片、ping/pong、close）。
 - `lib/driver.js`：连接管理、标签页注册、请求/响应关联、页面注入、`scan` / `runScript` / `monitorStart` / `monitorFinish` / `act` / `waitFor` / `cdp` / 标签页操作；导航前解析相对 URL，绝对 URL 原样透传。
 - `lib/page/`：`opt_html.js` 与 `find_main_list.js` 从 GenericAgent 原样提取（`tools/import-from-genericagent.mjs`）；`scan_runtime.js` 是在浏览器里运行的优化、裁剪、截断、diff 实现；`actions.js` 提供 ref 编号、高层交互、等待与 DOM 稳定检测。
-- `lib/tools.js`：七个 DSH 工具定义（`defineTool`）。
-- `extension/`：MV3 扩展。`config.js` 里的 `WS_PORT` 必须与插件配置一致。
-- `assets/demo.html`：`/demo` 自检页（计数器、表单、弹窗、异步按钮、30 条长列表），用于快速验证 scan/act/wait/execute/screenshot。
+- `lib/tools.js`：九个 DSH 工具定义（`defineTool`）。
+- `extension/`：MV3 扩展。`config.js` 里的 `WS_PORT` 必须与插件配置一致；`popup_bridge.js` 负责把页面里延迟触发的 `window.open` 转发给后台。
+- `assets/demo.html`：`/demo` 自检页（计数器、表单、弹窗、异步按钮、上传/下载、延迟 `window.open`、30 条长列表），用于快速验证 scan/act/wait/execute/upload/download/screenshot。另提供 `/download?name=&bytes=` 下载 fixture。
 
 ## 目录
 
@@ -37,7 +37,7 @@ dsh-browser-control/
 ├── lib/
 │   ├── index.js          # 插件入口：Config + apply
 │   ├── driver.js         # WS/HTTP 服务 + 浏览器会话
-│   ├── tools.js          # 7 个工具
+│   ├── tools.js          # 9 个工具
 │   ├── ws.js             # 无依赖 WebSocket 服务端
 │   └── page/             # 注入浏览器的扫描运行时
 ├── extension/            # Chrome MV3 扩展（加载这个目录）
@@ -56,6 +56,7 @@ dsh-browser-control/
 2. “加载已解压的扩展程序”，选择本目录下的 **`extension/`**（不是仓库根目录）。
 3. 打开任意 `http(s)` 页面，右下角出现 `ljq_driver` 状态角标即表示扩展已运行。
 4. 若扩展图标弹窗显示未连接，确认插件服务已启动，并且 `extension/config.js` 的 `WS_PORT` 与插件 `port` 一致。
+5. 本版本扩展新增了 `downloads` 权限与 `popup_bridge.js` content script；从旧版本升级后需要在 `chrome://extensions` 里点一次“重新加载”，否则异步窗口兜底和下载工具不可用。
 
 ### 2. 安装 DSH 插件（本地开发 / 热挂载）
 
@@ -220,10 +221,41 @@ return input.value;
 - `press` 支持 `Control/Meta/Alt/Shift+键`；在输入框里按 `Enter` 会额外触发所在表单的 `requestSubmit()`。
 - click 若触发导航，工具会检测 URL 变化并按成功返回；动作后仍建议用 `browser_wait` 明确等待目标状态。
 - `target="_blank"` / 命名窗口的链接，以及页面脚本里的 `window.open()`：合成点击没有用户手势，浏览器会把新窗口当弹窗拦截。页面会回报被拦下的目标（链接点击走 `popup` 字段，`window.open` 走 `popups` 数组），工具在没等到新标签页时用 `chrome.tabs.create` 在后台打开（去重、最多 3 个）并写入 `new_tabs`，回执 `hint` 说明是兜底打开的；需要新标签页前台显示时传 `active` 或在之后用 `browser_tabs activate`。
+- **异步 `window.open`**（`点击 → 请求完成 → 打开新窗口`、`setTimeout`、`await` 之后）：补丁常驻在页面里，动作返回后才发生的 `window.open` 会经 `popup_bridge.js` 转发给后台，由扩展用 `chrome.tabs.create` 打开，并通过 `newTabs` 消息登记到 driver。这类 tab 不需要再调用一次 `browser_act`；想在同一动作里等到它，传 `await_popup_ms`（如 `3000`），工具会轮询标签页并把结果写进 `new_tabs` / `hint`。页面里 `window.open()` 的返回值仍然是 `null`（单页脚本的 `if (!w) fallback` 逻辑照常成立）；如果页面同时做了同标签回退，补丁会跳过重复开 tab。
 - `changed` = DOM mutation 数 + 属性值变化数（`dom_changes` / `property_changes` 分开回传）。`check`/`uncheck`、`select`、受控输入框只改 `checked`/`value` 等 property，不产生 mutation，以前会误报“0 处变化”。
 - 回执还带 `state_json`（目标元素当前生效状态，如 `{"checked":false}`、`{"value":"qa","label":"测试"}`）和 `value_changes_json`（本次动作前后状态差异），属性值没变时不会列。
 - `changed` 会统计 `<dialog open>`、`inert`、`aria-modal`、`data-state` 等弹窗/portal 常见属性变化，弹窗已打开不会再误报“0 处变化”。
 - 默认 settle 上限 800ms；持续重渲染的页面可用 `settle_timeout_ms` 调整。站点若忽略 `isTrusted=false` 的 JS 点击，退回 `browser_cdp` 的 `Input.dispatchMouseEvent`。
+
+### `browser_upload`
+
+给页面的 `<input type="file">` 写入本机文件。页面 JS 无法伪造 `input.files`，这里通过 CDP `DOM.setFileInputFiles` 写入真实文件，页面会收到正常的 `input`/`change` 事件。`target` 与 `browser_act` 相同（CSS / `text=` / `role=` / `@eN`），`files` 是绝对路径数组（多选 input 可传多个）。
+
+```json
+{ "target": "#file-input", "files": ["/tmp/report.pdf"] }
+{ "target": "@e12", "files": ["/tmp/a.png", "/tmp/b.png"], "settle": true }
+```
+
+- 返回实际 `input.files`（`files_json`）、`count`、`multiple`/`accept`，以及写入后 settle 期间的 DOM 变化；`hint` 会说明页面是否响应了 `change`。
+- 文件不存在、不可读、目标不是 file input（`NOT_FILE_INPUT`）都会返回明确的错误；被 React 重新渲染掉的组件可用 `browser_wait` 先等 loading 结束，或用更稳定的 CSS 定位。
+- 很多上传组件把真实 input 隐藏起来：先 `browser_scan` 找到 `<input type="file">`，再按 CSS 或 `@eN` 定位；写入后继续 `browser_act` 点击“提交”即可。当前只支持主文档里的 file input（iframe 内的上传控件会被标记但 CDP 找不到节点，会报错而不是静默失败）。
+
+### `browser_download`
+
+通过 `chrome.downloads` 下载文件或等待页面自己触发的下载，返回绝对保存路径、字节数、状态与目录。
+
+```json
+{ "action": "url", "url": "https://example.com/report.pdf" }
+{ "action": "url", "url": "https://example.com/report.pdf", "filename": "reports/q3.pdf" }
+{ "action": "click", "target": "#download-link" }
+{ "action": "wait", "since": 1762000000000 }
+{ "action": "list", "limit": 5 }
+```
+
+- `action=url` 由扩展直接发起下载（`saveAs:false`、同名文件 `uniquify`），`filename` 相对默认下载目录；返回时通常已 `complete`。
+- `action=click` 用真实的 CDP 鼠标事件点击目标（不是 `element.click()`），因此页面在 click handler 里动态创建 `<a download>` 再 `click()` 的常见“导出/下载按钮”也能触发；随后按点击时间等待新下载。Chrome 会拒绝无用户手势的脚本下载，这也是这里不直接走 `browser_act` 的原因。超时返回 `[DOWNLOAD_NOT_STARTED]`，可改用 `url` 直接下载资源地址。
+- `action=wait` 用于页面 JS 自己触发的下载（`since` 是 epoch 毫秒）；`action=list` 查看最近下载记录与下载目录。
+- 下载目录由 Chrome 的默认设置决定（headless 测试会把它指到临时目录）；被中断的下载返回 `state=interrupted` 并视为错误。
 
 ### `browser_wait`
 
@@ -276,18 +308,19 @@ return input.value;
 - `browser_act` / execute_js diff 把 checkbox `checked`、select `value`、受控输入框等 property 变化计入 `changed`，回执附带当前状态与生效的值变更。
 - `browser_act` 点击 `target="_blank"` 链接时，因弹窗拦截不会打开新窗口；改为页面回报链接目标、工具用 `chrome.tabs.create` 后台打开并写入 `new_tabs`。
 - `browser_act` 兼容页面脚本里的 `window.open()` 兜底：页面注入轻量包装器记录被弹窗拦截的地址（`popups`），工具同样用 `chrome.tabs.create` 后台打开并在 `hint` 中说明。
+- `window.open` 补丁常驻并覆盖异步调用：动作返回后（`setTimeout`/`await` 链）的 `window.open` 经 `popup_bridge.js` 转发给后台打开，配 `await_popup_ms` 可在动作回执里直接看到新标签页；`browser_upload`（CDP `DOM.setFileInputFiles`）与 `browser_download`（`chrome.downloads`，含点击触发/等待/列表）补齐文件上传下载。
 - `browser_scan` 不再把所有超过 30 字符的 `href` 替换成 `__link__`，只屏蔽 `javascript:`/`data:`/`vbscript:` 等可执行 scheme，链接目标对 agent 可读。
 
 ## 测试
 
 ```bash
-# 1) 插件装配：Config、七个工具注册、无扩展时的提示
+# 1) 插件装配：Config、九个工具注册、无扩展时的提示
 node test/plugin.test.mjs
 
 # 2) 协议：真实 WS 服务 + 模拟扩展（握手、ack/result、注入、scan、CDP、相对 URL、agent tab）
 node test/protocol.test.mjs
 
-# 3) 真机端到端：headless Chrome + 本扩展，扫描/ref/act/wait/监控/标签页/导航/CDP 截图
+# 3) 真机端到端：headless Chrome + 本扩展，扫描/ref/act/wait/监控/标签页/导航/CDP 截图/上传下载/异步 window.open
 node test/e2e-chrome.test.mjs
 ```
 
@@ -304,14 +337,15 @@ ln -sfn "$HOME/workspace/dsh/dsh-remote/node_modules/@deepseek-ai/dsh-tools" nod
 ## 安全说明
 
 - 服务只监听 `127.0.0.1`；仍建议不要在有敏感账号的日常浏览器里使用，最好用独立 Chrome profile。
-- 扩展申请了 `debugger`、`<all_urls>`、`declarativeNetRequest`（移除页面 CSP）等宽权限，能让模型在页面里执行任意 JS/CDP。请只在自己信任的会话中使用。
+- 扩展申请了 `debugger`、`downloads`、`<all_urls>`、`declarativeNetRequest`（移除页面 CSP）等宽权限，能让模型在页面里执行任意 JS/CDP、读写下载目录。请只在自己信任的会话中使用。
+- `popup_bridge.js` 只转发形如 `{source:'dsh-browser-control', type:'dsh_popup'}` 的页面消息，且只接受 http(s)/file/chrome-extension 地址、每页每秒最多 6 次；被控制的页面自身理论上也能伪造该消息，但结果最多是多开一个后台标签页，不会执行脚本或回传数据。
 - 本机其他进程/页面若连接 18865 并发送 `ext_ready`，会注册为“标签页”，但只能收到发往它自己的脚本；真正的扩展仍是唯一能操作 Chrome 的客户端。
 - 扩展会为所有页面移除 CSP 响应头，以规避 `unsafe-eval` 限制；这是为了 `browser_execute_js` 的可用性，属于有意为之。
 
 ## 常见问题
 
 **扩展页面不在标签页列表里 / 无法扫描？**
-请确认扩展已更新到 v2.9+ 并在 `chrome://extensions` 里“重新加载”；旧版会过滤掉 `chrome-extension://` 页面。扩展页面的脚本执行走 CDP 兜底，首次调用可能比普通网页慢一点。
+请确认扩展已更新到 v3.0+ 并在 `chrome://extensions` 里“重新加载”；旧版会过滤掉 `chrome-extension://` 页面。扩展页面的脚本执行走 CDP 兜底，首次调用可能比普通网页慢一点。
 
 **扩展未连接？**
 `curl http://127.0.0.1:18865/` 应返回 `{"ok":true,...}`；在 `chrome://extensions` 里重新加载扩展，并查看 Service Worker 控制台是否有 WS 错误。

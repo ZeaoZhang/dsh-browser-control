@@ -41,6 +41,8 @@ const expected = [
   'browser_execute_js',
   'browser_act',
   'browser_wait',
+  'browser_upload',
+  'browser_download',
   'browser_cdp',
   'browser_screenshot',
 ];

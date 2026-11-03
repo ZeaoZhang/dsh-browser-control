@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "DSH Browser Control Bridge",
-  "version": "2.9",
+  "version": "3.0",
   "description": "DeepSeek Harness browser-control bridge: WebSocket → chrome.scripting / CDP",
   "permissions": [
     "cookies",
@@ -12,7 +12,8 @@
     "alarms",
     "declarativeNetRequest",
     "management",
-    "contentSettings"
+    "contentSettings",
+    "downloads"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -32,6 +33,16 @@
       "run_at": "document_start",
       "all_frames": true,
       "world": "MAIN"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "popup_bridge.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
     },
     {
       "matches": [

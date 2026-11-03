@@ -74,8 +74,27 @@
     <button id="blank-js-btn" type="button">JS 新窗口（window.open）</button>
   </section>
 
+  <section id="file-section">
+    <h2>文件上传 / 下载</h2>
+    <p class="muted">input.files 只能由 CDP 写入；下载链接返回 Content-Disposition: attachment。</p>
+    <label for="file-input">选择文件</label>
+    <input id="file-input" name="attachment" type="file" multiple accept=".txt,.json,.png">
+    <p id="file-status" class="status" aria-live="polite">未选择文件</p>
+    <a id="download-link" href="/download?name=demo-report.txt&bytes=4096" download="demo-report.txt">下载示例文件</a>
+    <button id="download-btn" class="secondary" type="button">触发下载（JS）</button>
+    <p id="download-status" class="status" aria-live="polite">未触发下载</p>
+  </section>
+
+  <section id="async-popup-section">
+    <h2>异步新窗口（点击 → 延迟 → window.open）</h2>
+    <p class="muted">setTimeout 里的 window.open 已超出动作的同步窗口，由常驻补丁 + chrome.tabs.create 兜底。</p>
+    <button id="async-open-btn" data-testid="async-open" type="button">300ms 后打开新窗口</button>
+    <p id="async-open-status" class="status" aria-live="polite">未触发</p>
+  </section>
+
   <section id="list-section">
     <h2>任务列表（用于测试列表裁剪）</h2>
+
     <ul id="task-list">
       <li class="task-item" data-id="1"><span class="desc">这是第 1 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">修复登录页样式</span> <span class="priority">P1</span> <span class="assignee">王芳</span></li>
       <li class="task-item" data-id="2"><span class="desc">这是第 2 条待办事项的详细描述，用于验证浏览器扫描时对大列表的裁剪与折叠逻辑，确保只保留前三条并给出隐藏项提示。</span> <span class="title">补充浏览器插件文档</span> <span class="priority">P2</span> <span class="assignee">李雷</span></li>
@@ -135,6 +154,34 @@
 
     document.getElementById('open-dialog-btn').addEventListener('click', () => {
       document.getElementById('confirm-dialog').showModal();
+    });
+
+    document.getElementById('file-input').addEventListener('change', (event) => {
+      const files = Array.from(event.target.files || []);
+      document.getElementById('file-status').textContent = files.length
+        ? '已选择: ' + files.map((file) => `${file.name} (${file.size}B, ${file.type || 'unknown'})`).join(', ')
+        : '未选择文件';
+    });
+
+    document.getElementById('download-btn').addEventListener('click', () => {
+      const anchor = document.createElement('a');
+      anchor.href = '/download?name=js-download.txt&bytes=3072';
+      anchor.download = 'js-download.txt';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      document.getElementById('download-status').textContent = '已触发 js-download.txt ' + new Date().toLocaleTimeString();
+    });
+
+    document.getElementById('async-open-btn').addEventListener('click', () => {
+      const status = document.getElementById('async-open-status');
+      window.__asyncOpenCalled = (window.__asyncOpenCalled || 0) + 1;
+      status.textContent = '等待 300ms 后调用 window.open…';
+      setTimeout(() => {
+        window.__asyncOpenDone = (window.__asyncOpenDone || 0) + 1;
+        const opened = window.open('/demo?ref=async-open&from=setTimeout-window-open', '_blank');
+        status.textContent = 'window.open 已调用，返回 ' + (opened ? 'WindowProxy' : 'null');
+      }, 300);
     });
 
     let nextTaskId = 31;

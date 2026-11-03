@@ -19,6 +19,175 @@ chrome.runtime.onInstalled.addListener(() => {
 const EXT_BRIDGE_MESSAGE = 'DSH_BROWSER_BRIDGE';
 const EXT_BRIDGE_TIMEOUT_MS = 25000;
 
+function wsSend(payload) {
+  try {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  } catch (e) { /* socket went away between the check and the send */ }
+}
+
+// --- async window.open bridge ---------------------------------------------
+// The page runtime posts blocked window.open() destinations that happen after
+// an action returned (setTimeout/await chains). popup_bridge.js forwards them
+// here; remember them briefly so the browser_act fallback does not open the
+// same destination a second time.
+const RECENT_POPUP_MS = 3000;
+const recentPopups = new Map(); // href -> { at, tab }
+
+function popupTabOf(href) {
+  const hit = recentPopups.get(href);
+  if (!hit) return null;
+  if (Date.now() - hit.at > RECENT_POPUP_MS) {
+    recentPopups.delete(href);
+    return null;
+  }
+  return hit.tab;
+}
+
+function notePopup(href, tab) {
+  if (!href || !tab) return;
+  recentPopups.set(href, { at: Date.now(), tab });
+  if (recentPopups.size > 20) {
+    const now = Date.now();
+    for (const [key, value] of recentPopups) {
+      if (now - value.at > RECENT_POPUP_MS) recentPopups.delete(key);
+    }
+  }
+}
+
+async function handleOpenPopup(msg, sender) {
+  try {
+    const href = String(msg.href || '');
+    if (!/^(https?|file|chrome-extension):/i.test(href)) {
+      return { ok: false, error: '拒绝打开不支持的地址: ' + href };
+    }
+    const existing = popupTabOf(href);
+    if (existing) return { ok: true, data: { ...existing, deduped: true } };
+    const tab = await chrome.tabs.create({
+      url: href,
+      active: false,
+      openerTabId: sender.tab?.id,
+    });
+    const ready = await waitForTabReady(tab.id, 5000);
+    const data = ready || {
+      id: tab.id,
+      url: tab.pendingUrl || tab.url || href,
+      title: tab.title || '',
+      status: tab.status,
+      windowId: tab.windowId,
+      active: !!tab.active,
+    };
+    notePopup(href, data);
+    // The page-side call that triggered this has usually already returned, so
+    // no in-flight action/result can carry the tab: tell the driver now.
+    wsSend({ type: 'newTabs', tabs: [data] });
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+// --- downloads -------------------------------------------------------------
+function downloadSummary(item) {
+  if (!item) return null;
+  return {
+    id: item.id,
+    url: item.url || item.finalUrl || '',
+    final_url: item.finalUrl || '',
+    filename: item.filename || '',
+    bytes: Number(item.bytesReceived) || Number(item.fileSize) || 0,
+    file_size: Number(item.fileSize) || 0,
+    state: item.state || '',
+    mime: item.mime || '',
+    error: item.error || '',
+    exists: item.exists !== false,
+    by_extension: item.byExtensionId === chrome.runtime.id,
+    start_time: item.startTime || '',
+    end_time: item.endTime || '',
+  };
+}
+
+async function latestDownloads(since) {
+  const startedAfter = new Date(Math.max(0, since - 1500)).toISOString();
+  let items = [];
+  try {
+    items = await chrome.downloads.search({ startedAfter, orderBy: ['-startTime'], limit: 10 });
+  } catch (e) { /* fall through */ }
+  if (!items || !items.length) {
+    try { items = await chrome.downloads.search({ orderBy: ['-id'], limit: 5 }); } catch (e) { items = []; }
+  }
+  return items || [];
+}
+
+async function waitForDownload(since, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const items = await latestDownloads(since);
+    // A fresh candidate must have started at/after `since` (the click or the
+    // download() call). A tiny negative bias absorbs clock granularity only, so
+    // a previous, still-visible download is never mistaken for the new one.
+    const fresh = items.filter((item) => !item.startTime || Date.parse(item.startTime) >= since - 100);
+    if (fresh.length) {
+      last = fresh[0];
+      if (last.state && last.state !== 'in_progress') return downloadSummary(last);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  return last ? downloadSummary(last) : null;
+}
+
+async function downloadsDir() {
+  try {
+    const items = await chrome.downloads.search({ orderBy: ['-startTime'], limit: 1 });
+    const file = items && items[0] && items[0].filename;
+    if (!file) return null;
+    const match = String(file).match(/^(.*)[/\\][^/\\]*$/);
+    return match ? match[1] : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function handleDownload(msg) {
+  try {
+    const method = msg.method || 'list';
+    const timeoutMs = Math.min(Math.max(Number(msg.timeoutMs) || 20000, 1000), 120000);
+    if (method === 'list') {
+      const items = await chrome.downloads.search({
+        orderBy: ['-startTime'],
+        limit: Math.min(Math.max(Number(msg.limit) || 10, 1), 50),
+      });
+      return { ok: true, data: { downloads: (items || []).map(downloadSummary), dir: await downloadsDir() } };
+    }
+    if (method === 'start') {
+      const url = String(msg.url || '');
+      if (!/^(https?|file|blob|data):/i.test(url)) {
+        return { ok: false, error: 'browser_download 只支持 http(s)/file/blob/data 下载地址: ' + url };
+      }
+      const since = Date.now();
+      const id = await chrome.downloads.download({
+        url,
+        filename: msg.filename ? String(msg.filename) : undefined,
+        saveAs: false,
+        conflictAction: 'uniquify',
+      });
+      const download = await waitForDownload(since, timeoutMs);
+      if (!download) return { ok: false, error: '下载任务已创建（id=' + id + '），但 ' + timeoutMs + 'ms 内没有出现在下载列表中' };
+      return { ok: true, data: { id, download, dir: await downloadsDir() } };
+    }
+    if (method === 'wait') {
+      const since = Number(msg.since) || Date.now() - 60000;
+      const download = await waitForDownload(since, timeoutMs);
+      if (!download) return { ok: false, error: '未检测到新的下载任务（窗口 ' + timeoutMs + 'ms）' };
+      return { ok: true, data: { download, dir: await downloadsDir() } };
+    }
+    if (method === 'dir') return { ok: true, data: { dir: await downloadsDir() } };
+    return { ok: false, error: 'Unknown download method: ' + method };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 function sendMessageToExtension(extensionId, payload, timeoutMs = EXT_BRIDGE_TIMEOUT_MS) {
   return new Promise((resolve) => {
     let settled = false;
@@ -88,12 +257,18 @@ async function handleExtMessage(msg, sender) {
     return { ok: true, data: { state: status, ws: !!(ws && ws.readyState === WebSocket.OPEN), server: HTTP_PROBE } };
   }
   if (msg.cmd === 'cookies') return await handleCookies(msg, sender);
+  if (msg.cmd === 'open_popup') return await handleOpenPopup(msg, sender);
+  if (msg.cmd === 'download') return await handleDownload(msg);
   if (msg.cmd === 'ext_eval' || msg.cmd === 'ext_cdp') return await handleExtBridge(msg);
   if (msg.cmd === 'cdp') return await handleCDP(msg, sender);
   if (msg.cmd === 'batch') return await handleBatch(msg, sender);
   if (msg.cmd === 'tabs') {
     try {
       if (msg.method === 'create') {
+        if (msg.dedupe) {
+          const existing = popupTabOf(String(msg.url || ''));
+          if (existing) return { ok: true, data: { ...existing, deduped: true } };
+        }
         const tab = await chrome.tabs.create({
           url: msg.url,
           active: msg.active !== undefined ? msg.active : false,
@@ -104,7 +279,9 @@ async function handleExtMessage(msg, sender) {
         // chrome.tabs.create returns before the URL/title are populated; wait
         // briefly so callers get a usable url/title instead of an empty string.
         const ready = await waitForTabReady(tab.id, 5000);
-        return { ok: true, data: ready || { id: tab.id, url: tab.pendingUrl || tab.url || msg.url, title: tab.title || '', status: tab.status } };
+        const data = ready || { id: tab.id, url: tab.pendingUrl || tab.url || msg.url, title: tab.title || '', status: tab.status, windowId: tab.windowId, active: tab.active };
+        if (msg.dedupe) notePopup(String(msg.url || ''), data);
+        return { ok: true, data };
       }
       if (msg.method === 'switch') {
         const tab = await chrome.tabs.update(msg.tabId, { active: true });

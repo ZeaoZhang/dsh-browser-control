@@ -3,7 +3,7 @@
 // Requires Google Chrome (CHROME env var overrides the default macOS path).
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { cp, mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,15 @@ const extDir = path.join(tmp, 'extension');
 const profileDir = path.join(tmp, 'profile');
 await cp(path.join(ROOT, 'extension'), extDir, { recursive: true });
 await mkdir(profileDir, { recursive: true });
+const downloadsDir = path.join(tmp, 'downloads');
+await mkdir(downloadsDir, { recursive: true });
+// chrome.downloads saves into the profile's download directory; point it at
+// the temp dir so tests can verify the bytes on disk and clean up afterwards.
+await mkdir(path.join(profileDir, 'Default'), { recursive: true });
+await writeFile(path.join(profileDir, 'Default', 'Preferences'), JSON.stringify({
+  download: { default_directory: downloadsDir, prompt_for_download: false, directory_upgrade: true },
+}));
+const realDownloadsDir = await realpath(downloadsDir);
 const configPath = path.join(extDir, 'config.js');
 const configText = await readFile(configPath, 'utf8');
 await writeFile(configPath, configText.replace(/WS_PORT = \d+/, `WS_PORT = ${PORT}`));
@@ -259,6 +268,18 @@ try {
   assert.ok(tiny.length <= 1200, `small max_chars not enforced: ${tiny.length}`);
   assert.ok(tiny.includes('row 0') && tiny.includes('填充文本'), `small max_chars returned a skeleton: ${tiny.slice(0, 300)}`);
   assert.ok(!/<(h3|p|section)[^>]*><\/\1>/.test(tiny), `small max_chars emptied elements: ${tiny.slice(0, 300)}`);
+  // Sweep budgets so the cut lands inside every container shape. A container
+  // whose content does not fit must be dropped whole, not emitted empty.
+  await driver.runScript(target, `document.body.innerHTML = Array.from({ length: 120 }, (_, i) =>
+    '<div class="row"><h3>item ' + i + '</h3><p>' + '文案 '.repeat(20) + '</p><span class="tag">tag ' + i + '</span></div>').join('');
+    return 1;`);
+  for (let budget = 480; budget <= 1200; budget += 37) {
+    const out = await driver.scan(target, { maxChars: budget, cutList: false });
+    assert.ok(out.length <= budget, `sweep ${budget}: length ${out.length} exceeds budget`);
+    const empties = out.match(/<(div|h3|p|span)([^>]*)><\/\1>/g) || [];
+    assert.equal(empties.length, 0, `sweep ${budget}: empty containers ${empties.slice(0, 3)}`);
+  }
+  console.log('truncation sweep ok');
   console.log(`max_chars ok: ${capped.length} chars (tiny ${tiny.length})`);
 
   // --- tabs ---------------------------------------------------------------
@@ -423,6 +444,185 @@ try {
   console.log('screenshot ok');
   console.log('cdp ok');
 
+  // --- async window.open: click → setTimeout → window.open ---------------
+  // The tap must stay resident: by the time setTimeout fires, browser_act has
+  // already returned, so only the page→extension bridge can open the tab.
+  await driver.runScript(target, `(() => {
+    document.body.innerHTML = '<button id="async-open-btn" type="button">异步新窗口</button><p id="async-open-status">未触发</p>';
+    window.__asyncOpenCalled = 0;
+    window.__asyncOpenDone = 0;
+    window.__asyncOpenResult = 'unset';
+    document.getElementById('async-open-btn').addEventListener('click', () => {
+      window.__asyncOpenCalled += 1;
+      setTimeout(() => {
+        window.__asyncOpenDone += 1;
+        window.__asyncOpenResult = window.open('/demo?ref=async-open&from=setTimeout-window-open', '_blank') ? 'proxy' : 'null';
+      }, 300);
+    });
+    return 1;
+  })()`);
+  await driver.syncTabs();
+  const asyncPopupClick = await tools.get('browser_act').execute(
+    { tab_id: target.tab.id, action: 'click', target: '#async-open-btn', await_popup_ms: 3000 },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(asyncPopupClick.status, 'success', `async window.open click failed: ${JSON.stringify(asyncPopupClick)}`);
+  assert.equal(asyncPopupClick.new_tabs.length, 1,
+    `async window.open opened ${asyncPopupClick.new_tabs.length} tabs: ${JSON.stringify(asyncPopupClick.new_tabs)}`);
+  assert.match(asyncPopupClick.new_tabs[0].url, /from=setTimeout-window-open/);
+  assert.match(asyncPopupClick.hint, /异步|新标签页/);
+  const asyncFlags = await driver.runScript(target, `return {
+    called: window.__asyncOpenCalled,
+    done: window.__asyncOpenDone,
+    result: window.__asyncOpenResult,
+  }`);
+  assert.equal(asyncFlags.called, 1, 'click handler did not run');
+  assert.equal(asyncFlags.done, 1, 'setTimeout callback did not reach window.open');
+  assert.equal(asyncFlags.result, 'null', 'window.open should still return null in the page');
+  await driver.syncTabs();
+  assert.equal(
+    driver.listTabs().filter((tab) => tab.url.includes('from=setTimeout-window-open')).length,
+    1,
+    `async popup was opened more than once: ${JSON.stringify(driver.listTabs())}`,
+  );
+  await driver.closeTab({ conn: target.conn, tab: { id: asyncPopupClick.new_tabs[0].tab_id } }).catch(() => {});
+  console.log(`async window.open ok: ${asyncPopupClick.new_tabs[0].tab_id}`);
+
+  // A popup fired by plain page code (no browser_act at all) must also land:
+  // that is what proves the patch is resident rather than action-scoped.
+  await driver.runScript(target, `window.open('/demo?ref=resident-bridge&from=plain-script', '_blank'); return 1`);
+  let residentTab = null;
+  for (let i = 0; i < 20 && !residentTab; i += 1) {
+    await delay(150);
+    await driver.syncTabs();
+    residentTab = driver.listTabs().find((tab) => tab.url.includes('from=plain-script'));
+  }
+  assert.ok(residentTab, `resident window.open patch did not open a tab: ${JSON.stringify(driver.listTabs())}`);
+  await driver.closeTab({ conn: target.conn, tab: { id: residentTab.tab_id } }).catch(() => {});
+  console.log(`resident window.open ok: ${residentTab.tab_id}`);
+
+  // --- upload -------------------------------------------------------------
+  await driver.runScript(target, `(() => {
+    document.body.innerHTML = '<input id="file-input" type="file" multiple accept=".txt,.json"><p id="file-status">未选择文件</p>';
+    document.getElementById('file-input').addEventListener('change', (event) => {
+      const files = Array.from(event.target.files || []);
+      document.getElementById('file-status').textContent = '已选择 ' + files.map((file) => file.name + ':' + file.size).join(', ');
+    });
+    return 1;
+  })()`);
+  const uploadContent = 'hello from browser_upload\n';
+  const uploadFile = path.join(tmp, 'upload-fixture.txt');
+  await writeFile(uploadFile, uploadContent);
+  const uploaded = await tools.get('browser_upload').execute(
+    { tab_id: target.tab.id, target: '#file-input', files: [uploadFile] },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(uploaded.status, 'success', `upload failed: ${JSON.stringify(uploaded)}`);
+  assert.equal(uploaded.count, 1, `upload reported ${uploaded.count} files`);
+  assert.equal(uploaded.files[0], 'upload-fixture.txt');
+  assert.equal(uploaded.changed, true, 'change event did not run after upload');
+  const uploadState = await driver.runScript(target, `const input = document.getElementById('file-input');
+return {
+  name: input.files[0] && input.files[0].name,
+  size: input.files[0] && input.files[0].size,
+  status: document.getElementById('file-status').textContent,
+  marked: input.hasAttribute('data-dsh-upload-mark'),
+};`);
+  assert.equal(uploadState.name, 'upload-fixture.txt');
+  assert.equal(uploadState.size, Buffer.byteLength(uploadContent));
+  assert.match(uploadState.status, /upload-fixture\.txt:/);
+  assert.equal(uploadState.marked, false, 'upload mark leaked into the page');
+  const badUpload = await tools.get('browser_upload').execute(
+    { tab_id: target.tab.id, target: '#file-status', files: [uploadFile] },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(badUpload.status, 'error', `non-file target upload unexpectedly succeeded: ${JSON.stringify(badUpload)}`);
+  assert.match(badUpload.error, /不是 <input type="file">/);
+  console.log(`upload ok: ${uploaded.files_json}`);
+
+  // --- download -----------------------------------------------------------
+  const downloadUrl = `http://127.0.0.1:${PORT}/download?name=agent-download.txt&bytes=777`;
+  const dl = await tools.get('browser_download').execute(
+    { tab_id: target.tab.id, action: 'url', url: downloadUrl, timeout_ms: 15000 },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(dl.status, 'success', `download url failed: ${JSON.stringify(dl)}`);
+  assert.equal(dl.bytes, 777, `download reported ${dl.bytes} bytes`);
+  assert.equal(dl.state, 'complete');
+  assert.ok(dl.filename.endsWith('agent-download.txt'), `unexpected filename: ${dl.filename}`);
+  const dlDir = path.dirname(dl.filename);
+  assert.ok(dlDir === downloadsDir || dlDir === realDownloadsDir, `download went to ${dlDir}`);
+  assert.equal((await readFile(dl.filename)).length, 777);
+
+  // Page-triggered download: click an anchor, then wait for the task.
+  await driver.runScript(target, `(() => {
+    document.body.innerHTML = '<a id="download-link" href="/download?name=clicked.txt&bytes=321" download="clicked.txt">下载</a>';
+    return 1;
+  })()`);
+  const dlClick = await tools.get('browser_download').execute(
+    { tab_id: target.tab.id, action: 'click', target: '#download-link', timeout_ms: 15000 },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(dlClick.status, 'success', `download click failed: ${JSON.stringify(dlClick)}`);
+  assert.equal(dlClick.bytes, 321);
+  assert.match(dlClick.filename, /clicked\.txt$/);
+  assert.equal((await readFile(dlClick.filename)).length, 321);
+
+  const dlList = await tools.get('browser_download').execute(
+    { tab_id: target.tab.id, action: 'list', limit: 5 },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(dlList.status, 'success', `download list failed: ${JSON.stringify(dlList)}`);
+  assert.match(dlList.downloads_json, /clicked\.txt/);
+  console.log(`download ok: ${dl.filename}, ${dlClick.filename}`);
+
+  // --- demo page's own upload/download/async controls ---------------------
+  // Everything above used elements injected by the test; this pass drives the
+  // fixture page exactly like a user would (README tells people to open /demo).
+  await driver.navigate(target, `http://127.0.0.1:${PORT}/demo`);
+  const uploadSecond = path.join(tmp, 'upload-second.json');
+  await writeFile(uploadSecond, '{"ok":true}');
+  const demoUpload = await tools.get('browser_upload').execute(
+    { tab_id: target.tab.id, target: '#file-input', files: [uploadFile, uploadSecond] },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(demoUpload.status, 'success', `demo upload failed: ${JSON.stringify(demoUpload)}`);
+  assert.equal(demoUpload.accept, '.txt,.json,.png');
+  assert.equal(demoUpload.multiple, true);
+  assert.equal(demoUpload.count, 2, `multi-file upload reported ${demoUpload.count} files`);
+  assert.deepEqual(demoUpload.files, ['upload-fixture.txt', 'upload-second.json']);
+  const demoUploadStatus = await driver.runScript(target,
+    `return document.getElementById('file-status').textContent`);
+  assert.match(demoUploadStatus, /已选择: upload-fixture\.txt \(26B, text\/plain\), upload-second\.json \(11B, application\/json\)/);
+
+  const demoAsync = await tools.get('browser_act').execute(
+    { tab_id: target.tab.id, action: 'click', target: '#async-open-btn', await_popup_ms: 3000 },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(demoAsync.status, 'success', `demo async popup click failed: ${JSON.stringify(demoAsync)}`);
+  assert.equal(demoAsync.new_tabs.length, 1,
+    `demo async popup opened ${demoAsync.new_tabs.length} tabs: ${JSON.stringify(demoAsync.new_tabs)}`);
+  assert.match(demoAsync.new_tabs[0].url, /from=setTimeout-window-open/);
+  const demoAsyncState = await driver.runScript(target, `return {
+    called: window.__asyncOpenCalled,
+    done: window.__asyncOpenDone,
+    status: document.getElementById('async-open-status').textContent,
+  }`);
+  assert.equal(demoAsyncState.called, 1);
+  assert.equal(demoAsyncState.done, 1);
+  assert.match(demoAsyncState.status, /返回 null/);
+  await driver.closeTab({ conn: target.conn, tab: { id: demoAsync.new_tabs[0].tab_id } }).catch(() => {});
+  const demoDl = await tools.get('browser_download').execute(
+    { tab_id: target.tab.id, action: 'click', target: '#download-btn', timeout_ms: 15000 },
+    { signal: new AbortController().signal },
+  );
+  assert.equal(demoDl.status, 'success', `demo download failed: ${JSON.stringify(demoDl)}`);
+  assert.equal(demoDl.bytes, 3072);
+  assert.match(demoDl.filename, /js-download\.txt$/);
+  assert.equal((await readFile(demoDl.filename)).length, 3072);
+
+  console.log(`demo page ok: upload/download/async (${demoDl.filename})`);
+
   // --- chrome-extension:// pages -----------------------------------------
   await driver.newTab(`chrome-extension://${loaded.id}/popup.html`, true);
   await new Promise((resolve) => setTimeout(resolve, 800));
@@ -431,7 +631,7 @@ try {
   assert.ok(extTab, `extension page missing from tabs: ${JSON.stringify(driver.listTabs())}`);
   const extTarget = await driver.resolveTarget({ tab_id: extTab.tab_id });
   const extVersion = await driver.runScript(extTarget, 'return window.__DSH_BROWSER__ ? window.__DSH_BROWSER__.version : null');
-  assert.equal(extVersion, 11);
+  assert.equal(extVersion, 13);
   const extHtml = await driver.scan(extTarget, { maxChars: 4000 });
   assert.ok(/Cookies|浏览器服务|DSH/.test(extHtml), `unexpected extension page scan: ${extHtml.slice(0, 300)}`);
   const extShot = await driver.cdp(extTarget, 'Page.captureScreenshot', { format: 'png' });
