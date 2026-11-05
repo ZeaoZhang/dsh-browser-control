@@ -1,6 +1,6 @@
 # dsh-browser-control
 
-把 [GenericAgent](https://github.com/lsdefine/GenericAgent) 的浏览器控制能力（`TMWebDriver` + `simphtml` + `tmwd_cdp_bridge` 扩展）抽取为 **DeepSeek Harness** 的独立插件：一个无第三方依赖的本地 WebSocket 服务 + 一个 Chrome MV3 扩展 + 九个 DSH 工具。
+把浏览器控制能力（`TMWebDriver` + `simphtml` + `tmwd_cdp_bridge` 扩展）抽取为 **DeepSeek Harness** 的独立插件：一个无第三方依赖的本地 WebSocket 服务 + 一个 Chrome MV3 扩展 + 九个 DSH 工具。
 
 - **无 Python 依赖**：WS 服务用 Node `node:http` 手写 RFC 6455，不需要 `ws` 包；HTML 优化/列表裁剪/变化监控逻辑整体移植到浏览器端 JS。
 - **协议兼容**：沿用 GenericAgent 的 `ext_ready` / `tabs_update` / `ack` / `result` / `error` 消息格式，可直接使用原版 `tmwd_cdp_bridge` 扩展；仓库内附带改进版扩展。
@@ -292,24 +292,6 @@ return input.value;
 { "format": "jpeg", "quality": 80 }
 { "full_page": true }
 ```
-
-## 与 GenericAgent 的差异
-
-- 去掉了 Python 端 `TMWebDriver` 的 HTTP 轮询远程模式（18766），只保留本地 WebSocket。
-- `simphtml.py` 的 BeautifulSoup 后处理改为浏览器端 DOM 操作；列表检测 `findMainList` 与可见 DOM 提取 `optHTML` 直接复用原 JS。
-- 保留了原版协议的向后兼容：原 `tmwd_cdp_bridge` 扩展可以直接连接本服务（没有 `active` 字段时按首个标签页回退）。
-- 仓库内扩展相对原版：`config.js` 抽离端口、`ext_ready`/`tabs_update` 带 `active`/`windowId`、`tabs` 命令新增 `close`/`navigate`、修复“同一行既有操作又有 `return`”时自动加 `return` 导致返回值丢失的问题。
-- 新增 `browser_screenshot` 与 `/demo` 自检页。
-- 新增 `browser_act` 与 `browser_wait`：高层交互、DOM settle、等待 selector/text/url/load_state/network_idle/stable。
-- `navigate` 支持相对 URL 且绝对 URL 原样透传；`open` 等待加载完成再返回 url/title；`agent` 标签页标记与 `close_agent_tabs`；`health` 自检。
-- `browser_scan` 输出输入框当前值/checked/selected/disabled 并过滤插件角标；HTML 模式给可交互元素分配稳定 `data-dsh-ref="@eN"`，`browser_act` 可直接引用；`text_only` 也会应用 `cut_list`；execute_js 的 DOM diff 改为紧凑摘要。
-- `browser_screenshot` 支持 `full_page`，截图时隐藏插件角标；整页超长（>16000px 或 >6400 万像素）返回 `[SCREENSHOT_TOO_LARGE]`；`browser_act` 的 settle 默认 100ms 静默/800ms 上限，可按需调整，且 mutation 计数覆盖 `open`/`inert`/`aria-modal`/`data-state` 等弹窗属性。
-- `max_chars` 截断改为按文档顺序保留整节点、只在文本字符边界切分，修复小上限时返回空标签骨架和 `[TRUNCATED 0k chars]` 的回归；`text_only` 同样遵守 `max_chars` 并优先在行边界截断。
-- `browser_act` / execute_js diff 把 checkbox `checked`、select `value`、受控输入框等 property 变化计入 `changed`，回执附带当前状态与生效的值变更。
-- `browser_act` 点击 `target="_blank"` 链接时，因弹窗拦截不会打开新窗口；改为页面回报链接目标、工具用 `chrome.tabs.create` 后台打开并写入 `new_tabs`。
-- `browser_act` 兼容页面脚本里的 `window.open()` 兜底：页面注入轻量包装器记录被弹窗拦截的地址（`popups`），工具同样用 `chrome.tabs.create` 后台打开并在 `hint` 中说明。
-- `window.open` 补丁常驻并覆盖异步调用：动作返回后（`setTimeout`/`await` 链）的 `window.open` 经 `popup_bridge.js` 转发给后台打开，配 `await_popup_ms` 可在动作回执里直接看到新标签页；`browser_upload`（CDP `DOM.setFileInputFiles`）与 `browser_download`（`chrome.downloads`，含点击触发/等待/列表）补齐文件上传下载。
-- `browser_scan` 不再把所有超过 30 字符的 `href` 替换成 `__link__`，只屏蔽 `javascript:`/`data:`/`vbscript:` 等可执行 scheme，链接目标对 agent 可读。
 
 ## 测试
 
